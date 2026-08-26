@@ -8,3 +8,4 @@ code/spike/status.log
 *.log
 
 .DS_Store
+docs/archive/
