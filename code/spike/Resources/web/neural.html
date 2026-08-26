@@ -1,0 +1,70 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>Neural</title><script src="ld.js"></script></head>
+<body><canvas id="c"></canvas>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d', { alpha: false });
+let W=0, H=0, nodes=[], packets=[];
+const DPR = 1;   // 桌面背景不需要 Retina 精度，省一半带宽
+
+function resize(){
+  W = cv.width = Math.floor(innerWidth*DPR); H = cv.height = Math.floor(innerHeight*DPR);
+  const n = Math.min(150, Math.round(W*H/16000));
+  nodes = Array.from({length:n}, () => ({
+    x: Math.random()*W, y: Math.random()*H,
+    vx: (Math.random()-.5)*.22, vy: (Math.random()-.5)*.22,
+    r: .8 + Math.random()*1.7, ph: Math.random()*6.28
+  }));
+  packets = [];
+}
+addEventListener('resize', resize); resize();
+
+__ld.loop((t, th, st) => {
+  const A = th.a, B = th.b;
+  ctx.fillStyle = __ld.css(th.bg); ctx.fillRect(0,0,W,H);
+
+  const speed = .35 + th.speed*1.4;
+  const LINK = 118 * (0.75 + th.energy*0.5);   // 越活跃，网络越密
+  const cx = W/2, cy = H/2;
+
+  for (const p of nodes){
+    p.x += p.vx*speed; p.y += p.vy*speed;
+    // 活跃时向中心轻微汇聚，视觉上像"注意力在收拢"
+    const g = th.energy*0.00035;
+    p.vx += (cx-p.x)*g; p.vy += (cy-p.y)*g;
+    p.vx *= .995; p.vy *= .995;
+    if (p.x<0||p.x>W) p.vx*=-1; if (p.y<0||p.y>H) p.vy*=-1;
+    p.x = Math.max(0,Math.min(W,p.x)); p.y = Math.max(0,Math.min(H,p.y));
+  }
+
+  ctx.lineWidth = 1;
+  for (let i=0;i<nodes.length;i++){
+    for (let j=i+1;j<nodes.length;j++){
+      const a=nodes[i], b=nodes[j];
+      const dx=a.x-b.x, dy=a.y-b.y, d=Math.hypot(dx,dy);
+      if (d > LINK) continue;
+      const k = (1 - d/LINK);
+      ctx.strokeStyle = __ld.css(A, k*k*0.30*(0.35+th.energy));
+      ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+      // 执行工具时，沿连线放"数据包"，让状态一眼能看出在动
+      if (st.phase === 'running' && Math.random() < 0.00035*th.energy)
+        packets.push({a,b,u:0,sp:.012+Math.random()*.02});
+    }
+  }
+
+  for (const p of nodes){
+    const glow = .45 + .55*Math.sin(t*1.6 + p.ph);
+    const rr = p.r*(1 + th.pulse*.5*glow);
+    ctx.fillStyle = __ld.css(B, .35 + .5*glow*th.energy);
+    ctx.beginPath(); ctx.arc(p.x,p.y,rr,0,6.2832); ctx.fill();
+  }
+
+  for (let i=packets.length-1;i>=0;i--){
+    const q = packets[i]; q.u += q.sp;
+    if (q.u >= 1){ packets.splice(i,1); continue; }
+    const x = q.a.x + (q.b.x-q.a.x)*q.u, y = q.a.y + (q.b.y-q.a.y)*q.u;
+    ctx.fillStyle = __ld.css(A, 1-q.u);
+    ctx.beginPath(); ctx.arc(x,y,2.1,0,6.2832); ctx.fill();
+  }
+  if (packets.length > 260) packets.length = 260;
+});
+</script></body></html>

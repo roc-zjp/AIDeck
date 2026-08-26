@@ -1,0 +1,56 @@
+#!/bin/bash
+# 不依赖菜单栏的控制入口
+cd "$(dirname "$0")"
+APP=./build/LiveDesktopSpike.app/Contents/MacOS/LiveDesktopSpike
+PID=$(pgrep -f "MacOS/LiveDesktopSpike" | head -1)
+case "${1:-status}" in
+  start)  pkill -f MacOS/LiveDesktopSpike 2>/dev/null; sleep 1
+          nohup $APP --log >/dev/null 2>status.log & sleep 2; echo "已启动 pid=$(pgrep -f MacOS/LiveDesktopSpike|head -1)";;
+  next)   [ -n "$PID" ] && kill -USR2 "$PID" && echo "已切换到下一个动画" || echo "未运行";;
+  hud)    if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi
+          case "${2:-}" in
+            tl|tr|bl|br) echo "hud $2" >> ~/.live-desktop.cmd
+                         echo "状态卡已吸附到 $2（tl左上 tr右上 bl左下 br右下）";;
+            edit|move|"") echo "hud edit" >> ~/.live-desktop.cmd
+                         echo "已进入拖动模式：状态卡临时浮到最上层并高亮"
+                         echo "→ 直接按住它拖到想要的位置，松手静止 1.5 秒即保存"
+                         echo "→ 完全不动则 20 秒后自动退出，位置不变";;
+            *) echo "用法: ./ld hud [tl|tr|bl|br|edit]";;
+          esac;;
+  pause)  [ -n "$PID" ] && kill -USR1 "$PID" && echo "已切换暂停/恢复" || echo "未运行";;
+  stop)   pkill -f MacOS/LiveDesktopSpike && echo "已退出";;
+  demo)   if [ -n "$PID" ]; then
+            pkill -f "ld-demo-loop" 2>/dev/null
+            nohup bash -c 'exec -a ld-demo-loop bash -c "for i in 1 2 3 4 5 6 7 8 9; do sleep 12; kill -USR2 '"$PID"' 2>/dev/null || exit; done"' >/dev/null 2>&1 &
+            echo "轮播已开：每 12 秒自动换一个动画，共约 108 秒"
+            echo "现在把窗口最小化（或 F11 / 四指张开显示桌面），坐着看完三个"
+          else echo "未运行，先 ./ld start"; fi;;
+  autostart)
+          PLIST=~/Library/LaunchAgents/com.zhoujunpeng.livedesktop.spike.plist
+          case "${2:-on}" in
+            on)  DIR="$(pwd)"
+                 cat > "$PLIST" <<PL
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.zhoujunpeng.livedesktop.spike</string>
+  <key>ProgramArguments</key>
+  <array><string>$DIR/build/LiveDesktopSpike.app/Contents/MacOS/LiveDesktopSpike</string><string>--log</string></array>
+  <key>WorkingDirectory</key><string>$DIR</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict></plist>
+PL
+                 launchctl unload "$PLIST" 2>/dev/null
+                 launchctl load "$PLIST" && echo "已设为开机自启，并接管保活（崩了会自动拉起）"
+                 echo "关闭：./ld autostart off";;
+            off) launchctl unload "$PLIST" 2>/dev/null; rm -f "$PLIST"; echo "已取消开机自启";;
+          esac;;
+  report) python3 "$(dirname "$0")/report.py";;
+  status) if [ -n "$PID" ]; then
+            echo "运行中 pid=$PID"
+            echo "最近状态（phase,tool,会话数,覆盖率,渲染,可见性,真实帧率）："
+            tail -3 diag.csv | cut -d, -f2,3,4,6,7,12,13 | sed 's/^/  /'
+          else echo "未运行"; fi;;
+  *) echo "用法: ./ld {start|next|demo|hud|autostart|report|pause|stop|status}";;
+esac

@@ -1,0 +1,10 @@
+# 构建产物（可重建）
+code/spike/.build/
+code/spike/build/
+
+# 运行时数据与日志（本机自用数据，不进版本库）
+code/spike/diag.csv
+code/spike/status.log
+*.log
+
+.DS_Store

@@ -1,0 +1,67 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>Aurora</title><script src="ld.js"></script></head>
+<body><canvas id="c"></canvas>
+<script>
+// 半分辨率渲染：软渐变肉眼无差，GPU 负载降约 4 倍（Retina 上是最有效的省电手段）
+const SCALE = 1.0;
+const cv = document.getElementById('c');
+const gl = cv.getContext('webgl', { antialias: false, depth: false, powerPreference: 'low-power' });
+
+const VS = `attribute vec2 p; void main(){ gl_Position = vec4(p,0.,1.); }`;
+const FS = `precision highp float;
+uniform vec2 uRes; uniform float uTime, uEnergy, uPulse;
+uniform vec3 uA, uB, uBg;
+float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+float noise(vec2 p){
+  vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);
+  return mix(mix(hash(i),hash(i+vec2(1,0)),u.x), mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),u.x), u.y);
+}
+float fbm(vec2 p){ float v=0.0, a=0.5;
+  for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=0.5; } return v; }
+void main(){
+  vec2 uv = (gl_FragCoord.xy - 0.5*uRes)/uRes.y;
+  // domain warping 两级：出来的是有机流动的能量带，不是死板的噪声
+  vec2 q = vec2(fbm(uv*1.5 + uTime*0.12), fbm(uv*1.5 + vec2(5.2,1.3) - uTime*0.09));
+  vec2 r = vec2(fbm(uv*2.0 + 3.0*q + vec2(1.7,9.2) + uTime*0.15),
+                fbm(uv*2.0 + 3.0*q + vec2(8.3,2.8) - uTime*0.11));
+  float f = fbm(uv*2.2 + 3.5*r);
+  vec3 bg = uBg/255.0, ca = uA/255.0, cb = uB/255.0;
+  vec3 col = mix(bg, ca, clamp(smoothstep(0.15,0.95,f)*1.35*uEnergy, 0.0, 1.0));
+  col = mix(col, cb, clamp(pow(length(r),2.0)*1.7*uEnergy, 0.0, 1.0));
+  float d = length(uv*vec2(1.0,1.45));
+  col += ca * uPulse * (0.5+0.5*sin(uTime*2.2)) * exp(-d*2.4) * 0.55;
+  col *= 1.0 - 0.38*pow(length(uv*vec2(0.72,1.0)), 2.2);
+  col += (hash(gl_FragCoord.xy + uTime)-0.5)*0.014;   // 抗色带
+  gl_FragColor = vec4(col, 1.0);
+}`;
+
+function sh(type, src){ const s=gl.createShader(type); gl.shaderSource(s,src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s)); return s; }
+const prog = gl.createProgram();
+gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog); gl.useProgram(prog);
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+const loc = gl.getAttribLocation(prog,'p');
+gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+const U = n => gl.getUniformLocation(prog,n);
+
+function resize(){
+  cv.width = Math.floor(innerWidth*SCALE); cv.height = Math.floor(innerHeight*SCALE);
+  gl.viewport(0,0,cv.width,cv.height);
+}
+addEventListener('resize', resize); resize();
+
+__ld.loop((t, th) => {
+  gl.uniform2f(U('uRes'), cv.width, cv.height);
+  gl.uniform1f(U('uTime'), t);
+  gl.uniform1f(U('uEnergy'), th.energy);
+  gl.uniform1f(U('uPulse'), th.pulse);
+  gl.uniform3f(U('uA'), th.a[0], th.a[1], th.a[2]);
+  gl.uniform3f(U('uB'), th.b[0], th.b[1], th.b[2]);
+  gl.uniform3f(U('uBg'), th.bg[0], th.bg[1], th.bg[2]);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+});
+</script></body></html>

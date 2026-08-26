@@ -1,0 +1,200 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>JARVIS</title><script src="ld.js"></script></head>
+<body><canvas id="c"></canvas>
+<script>
+/* 贾维斯式全息工作台。
+   原则：所有数字都来自真实的 Claude 会话数据，不放装饰性假数据 ——
+   否则它就退化成一张花哨壁纸，而不是一个能用的状态界面。 */
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d', { alpha: false });
+const MONO = "'SF Mono','Menlo','Consolas',monospace";
+
+// 贾维斯配色：青色为骨，状态只做色相偏移，警报态才转橙
+const SKIN = {
+  idle:     { key: [0x2e,0x7d,0x99], hi: [0x5a,0xc8,0xe8], tag: 'STANDBY',       cn: '待机'     },
+  thinking: { key: [0x6b,0x8c,0xff], hi: [0xa9,0xbe,0xff], tag: 'PROCESSING',    cn: '推理中'   },
+  running:  { key: [0x00,0xd4,0xc8], hi: [0x5a,0xff,0xe8], tag: 'EXECUTING',     cn: '执行中'   },
+  waiting:  { key: [0xff,0x95,0x00], hi: [0xff,0xc9,0x6b], tag: 'AWAITING INPUT',cn: '等待指令' },
+};
+
+let W = 0, H = 0, S = 1;
+let skin = { key: [...SKIN.idle.key], hi: [...SKIN.idle.hi] };
+let tag = SKIN.idle.tag, cn = SKIN.idle.cn;
+const rgba = (c, a) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+
+function resize() {
+  W = cv.width = innerWidth; H = cv.height = innerHeight;
+  S = Math.min(W, H) / 900;          // 统一缩放，保证不同屏幕比例一致
+}
+addEventListener('resize', resize); resize();
+
+function glow(color, blur, fn) {
+  ctx.save(); ctx.shadowColor = color; ctx.shadowBlur = blur; fn(); ctx.restore();
+}
+
+function text(str, x, y, size, alpha, align, weight) {
+  ctx.font = `${weight || 400} ${size * S}px ${MONO}`;
+  ctx.textAlign = align || 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = rgba(skin.hi, alpha);
+  ctx.fillText(str, x, y);
+}
+
+/* ── 中央反应堆：环的转速与密度跟着状态能量走 ───────────────────── */
+function reactor(t, cx, cy, R, energy, pulse) {
+  // 外刻度环：72 格，每 6 格一根长刻度
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(t * 0.08);
+  for (let i = 0; i < 72; i++) {
+    const a = i / 72 * Math.PI * 2;
+    const long = i % 6 === 0;
+    const r1 = R, r2 = R + (long ? 14 : 7) * S;
+    ctx.strokeStyle = rgba(skin.key, long ? 0.75 : 0.3);
+    ctx.lineWidth = long ? 1.6 : 1;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * r1, Math.sin(a) * r1);
+    ctx.lineTo(Math.cos(a) * r2, Math.sin(a) * r2);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // 分段弧：反向旋转，段数随活跃度增加
+  const segs = 3 + Math.round(energy * 3);
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(-t * (0.22 + energy * 0.5));
+  for (let i = 0; i < segs; i++) {
+    const a0 = i / segs * Math.PI * 2, a1 = a0 + (Math.PI * 2 / segs) * 0.55;
+    glow(rgba(skin.hi, 0.9), 14 * S, () => {
+      ctx.strokeStyle = rgba(skin.hi, 0.85);
+      ctx.lineWidth = 2.2 * S; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.arc(0, 0, R * 0.82, a0, a1); ctx.stroke();
+    });
+    ctx.fillStyle = rgba(skin.hi, 0.95);
+    ctx.beginPath(); ctx.arc(Math.cos(a1) * R * 0.82, Math.sin(a1) * R * 0.82, 2.6 * S, 0, 7); ctx.fill();
+  }
+  ctx.restore();
+
+  // 虚线内环
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(t * 0.35);
+  ctx.setLineDash([4 * S, 7 * S]);
+  ctx.strokeStyle = rgba(skin.key, 0.5); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(0, 0, R * 0.64, 0, 7); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+
+  // 核心：呼吸，等待输入时最明显
+  const breathe = 0.5 + 0.5 * Math.sin(t * 1.9);
+  const cr = R * (0.34 + pulse * 0.07 * breathe);
+  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, cr);
+  g.addColorStop(0, rgba(skin.hi, 0.55 + 0.3 * breathe * pulse));
+  g.addColorStop(0.55, rgba(skin.key, 0.16));
+  g.addColorStop(1, rgba(skin.key, 0));
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(cx, cy, cr, 0, 7); ctx.fill();
+  ctx.strokeStyle = rgba(skin.hi, 0.5); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(cx, cy, cr, 0, 7); ctx.stroke();
+
+  // 中心状态字
+  glow(rgba(skin.hi, 0.8), 16 * S, () => {
+    text(tag, cx, cy + 4 * S, 21, 0.98, 'center', 600);
+  });
+  text(cn, cx, cy + 30 * S, 12, 0.6, 'center');
+}
+
+/* ── 角标：四角 L 形框架 ─────────────────────────────────────── */
+function corners(m, len) {
+  ctx.strokeStyle = rgba(skin.key, 0.55); ctx.lineWidth = 1.5;
+  const pts = [[m, m, 1, 1], [W - m, m, -1, 1], [m, H - m, 1, -1], [W - m, H - m, -1, -1]];
+  for (const [x, y, sx, sy] of pts) {
+    ctx.beginPath();
+    ctx.moveTo(x, y + sy * len); ctx.lineTo(x, y); ctx.lineTo(x + sx * len, y);
+    ctx.stroke();
+  }
+}
+
+/* ── 信息面板 ───────────────────────────────────────────────── */
+function panel(x, y, title, rows, align) {
+  const a = align || 'left';
+  ctx.strokeStyle = rgba(skin.key, 0.45); ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(a === 'left' ? x : x - 46 * S, y - 13 * S);
+  ctx.lineTo(a === 'left' ? x + 46 * S : x, y - 13 * S);
+  ctx.stroke();
+  text(title, x, y, 10, 0.55, a, 600);
+  rows.forEach((r, i) => text(r, x, y + (17 + i * 15) * S, 11, i === 0 ? 0.92 : 0.62, a));
+}
+
+const pad = n => String(n).padStart(2, '0');
+const agoStr = s => `-${pad(Math.floor(s / 60))}:${pad(s % 60)}`;
+
+let bootAt = Date.now();
+
+__ld.loop((t, th, st) => {
+  const target = SKIN[st.phase] || SKIN.idle;
+  for (let i = 0; i < 3; i++) {
+    skin.key[i] += (target.key[i] - skin.key[i]) * 0.05;
+    skin.hi[i]  += (target.hi[i]  - skin.hi[i])  * 0.05;
+  }
+  tag = target.tag; cn = target.cn;
+
+  // 背板
+  ctx.fillStyle = '#03070a'; ctx.fillRect(0, 0, W, H);
+  const bg = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H) * 0.62);
+  bg.addColorStop(0, rgba(skin.key, 0.09)); bg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+  // 细网格
+  ctx.strokeStyle = rgba(skin.key, 0.05); ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = 0; x < W; x += 74 * S) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+  for (let y = 0; y < H; y += 74 * S) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+  ctx.stroke();
+
+  corners(30 * S, 26 * S);
+  reactor(t, W / 2, H / 2, Math.min(W, H) * 0.20, th.energy, th.pulse);
+
+  // 左上：真实会话列表
+  const sess = (st.sessions || []).map(s =>
+    `${(s.project || '?').slice(0, 16).toUpperCase().padEnd(17)}${(SKIN[s.phase] || SKIN.idle).tag.slice(0, 9)}`);
+  panel(52 * S, 62 * S, `SESSIONS  ${st.activeSessions || 0}`,
+        sess.length ? sess : ['NO ACTIVE SESSION']);
+
+  // 右上：时钟与运行时长
+  const d = new Date();
+  const up = Math.floor((Date.now() - bootAt) / 1000);
+  panel(W - 52 * S, 62 * S, 'SYSTEM TIME', [
+    `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`,
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+    `UPTIME ${pad(Math.floor(up / 3600))}:${pad(Math.floor(up / 60) % 60)}:${pad(up % 60)}`,
+  ], 'right');
+
+  // 左下：真实工具调用流
+  const logs = (st.recentTools || []).slice(0, 9).map(e =>
+    `${agoStr(Math.min(e.ago, 3599)).padEnd(8)}${e.tool.slice(0, 14).toUpperCase().padEnd(15)}${(e.project || '').slice(0, 12)}`);
+  panel(52 * S, H - 190 * S, 'ACTIVITY LOG', logs.length ? logs : ['NO RECENT ACTIVITY']);
+
+  // 右下：当前作业
+  panel(W - 52 * S, H - 190 * S, 'CURRENT TASK', [
+    (st.tool || '—').toUpperCase(),
+    (st.project || '—').toUpperCase(),
+    (st.branch || '—').toUpperCase(),
+  ], 'right');
+
+  // 活跃度条（真实：由状态能量驱动）
+  const bw = 190 * S, bx = W - 52 * S - bw, by = H - 118 * S;
+  ctx.strokeStyle = rgba(skin.key, 0.4); ctx.lineWidth = 1;
+  ctx.strokeRect(bx, by, bw, 5 * S);
+  glow(rgba(skin.hi, 0.8), 10 * S, () => {
+    ctx.fillStyle = rgba(skin.hi, 0.85);
+    ctx.fillRect(bx, by, bw * Math.min(1, th.energy), 5 * S);
+  });
+  text('LOAD', bx - 8 * S, by + 6 * S, 9, 0.5, 'right');
+
+  // 扫描线
+  const sy = ((t * 0.07) % 1) * H;
+  const sg = ctx.createLinearGradient(0, sy - 60 * S, 0, sy + 60 * S);
+  sg.addColorStop(0, 'rgba(0,0,0,0)');
+  sg.addColorStop(0.5, rgba(skin.hi, 0.07));
+  sg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = sg; ctx.fillRect(0, sy - 60 * S, W, 120 * S);
+  ctx.fillStyle = rgba(skin.hi, 0.16); ctx.fillRect(0, sy, W, 1);
+});
+</script></body></html>
