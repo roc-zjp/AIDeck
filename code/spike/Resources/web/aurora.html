@@ -1,5 +1,5 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<title>Aurora</title><script src="ld.js"></script></head>
+<title>Aurora</title><script src="ld.js"></script><script src="ld-widgets.js"></script></head>
 <body><canvas id="c"></canvas>
 <script>
 // 半分辨率渲染：软渐变肉眼无差，GPU 负载降约 4 倍（Retina 上是最有效的省电手段）
@@ -54,7 +54,7 @@ function resize(){
 }
 addEventListener('resize', resize); resize();
 
-__ld.loop((t, th) => {
+__ld.loop((t, th, st) => {
   gl.uniform2f(U('uRes'), cv.width, cv.height);
   gl.uniform1f(U('uTime'), t);
   gl.uniform1f(U('uEnergy'), th.energy);
@@ -63,5 +63,8 @@ __ld.loop((t, th) => {
   gl.uniform3f(U('uB'), th.b[0], th.b[1], th.b[2]);
   gl.uniform3f(U('uBg'), th.bg[0], th.bg[1], th.bg[2]);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
+  // 文字色向白靠 65%：本皮肤整屏都是主题色（警报态是亮橙），同色系文字会被吃掉，保色调但保证可读
+  const liteHi = c => c.map(v => Math.round(v + (255 - v) * 0.65));
+  __ldWidgets.draw(st, { key: th.a, hi: liteHi(th.b) });   // 小工具层画在自己的叠加 canvas 上，与 WebGL 互不干扰
 });
 </script></body></html>

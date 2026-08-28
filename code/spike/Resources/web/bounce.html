@@ -1,0 +1,148 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>Bounce</title><script src="ld.js"></script><script src="ld-widgets.js"></script></head>
+<body><canvas id="c"></canvas>
+<script>
+/* 弹球 —— 随机生成的小球在桌面里做零重力的弹性反弹：撞墙 / 球球碰撞都是完全弹性（能量守恒），带自旋交换，所以会一直弹下去。
+   （首版带重力 + 摩擦，几秒就全停在底边了，用户要求去掉重力。）
+   边界是**可见桌面**：菜单栏下沿、Dock 上沿（宿主把 NSScreen.visibleFrame 的内缩量随状态推来），球不会滚到 Dock 后面。
+   与状态的关系：每次真实工具调用再生成一颗球，球的颜色 = 生成那一刻的状态色（等你输入 = 琥珀）；状态切换时所有球被随机踢一下；
+   最多 12 颗，超出时最早的一颗淡出。物理常数不随状态变。桌面窗口点击穿透，所以这是一场看的"游戏"。 */
+const cv = document.getElementById('c'), ctx = cv.getContext('2d', { alpha: false });
+let W = 0, H = 0, S = 1;
+const PAL = { idle: [0x4c,0xb8,0xf0], thinking: [0xa8,0xa0,0xff], running: [0x44,0xf4,0xdc], waiting: [0xff,0xb6,0x4a] };
+const BG  = { idle: [0x05,0x08,0x0f], thinking: [0x07,0x06,0x12], running: [0x04,0x0c,0x0c], waiting: [0x0e,0x08,0x03] };
+const rgba = (c, a) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+const rnd = (a, b) => a + Math.random() * (b - a);
+function resize() { W = cv.width = innerWidth; H = cv.height = innerHeight; S = Math.min(W, H) / 900; }
+addEventListener('resize', resize); resize();
+
+// 皮肤自声明的设置项：宿主在设置页渲染、按皮肤名存值、经 setConfig 推回；这里只管读 __ld.config.skin（./ld skin <id> <值> 也能改）
+__ld.declarePrefs([
+  { id: 'gravity',     name: '重力',            type: 'bool',   default: false },
+  { id: 'maxBalls',    name: '球数上限',        type: 'number', default: 12, min: 1, max: 30, step: 1 },
+  { id: 'spawnOnTool', name: '每次工具调用加一颗', type: 'bool', default: true },
+  { id: 'size',        name: '球的大小',        type: 'choice', default: 'medium', options: [{ id: 'small', name: '小' }, { id: 'medium', name: '中' }, { id: 'large', name: '大' }] },
+  { id: 'avoidCursor', name: '球躲着光标走',    type: 'bool',   default: true },
+  { id: 'clickSpawn',  name: '点击桌面生成一颗', type: 'bool',  default: true },
+]);
+const P = () => __ld.config.skin;
+// 物理常数：长度按 S 缩放（不同分辨率下同样的"手感"），时间用真实 dt。
+// 默认零重力、无阻力、完全弹性 → 能量守恒，永不停；开了「重力」则落地 / 撞墙恢复系数 0.8、有滚动摩擦，几秒后停在底边（首版行为）
+const G = 1800;          // 重力 px/s²（S=1 时，仅重力开时生效）
+const E_BALL = 1.0;      // 球球碰撞恢复系数
+const SPIN_K = 0.25;     // 接触时切向速度与自旋的耦合强度（只影响自旋的视觉，不改平动能量）
+const V_MAX = 900;       // 状态切换踢球后的速度上限（px/s，S=1 时），防止越踢越快
+const ROLL = 1.4, STOP_V = 40;   // 重力模式：地面滚动摩擦（每秒损失比例）、不再弹起的竖直速度阈值
+const SIZE = { small: [10, 18], medium: [16, 32], large: [26, 46] };
+const balls = [];
+let bounds = { top: 0, bottom: 0, left: 0, right: 0 };   // 可见桌面内缩量（宿主给；浏览器里调试为 0）
+
+function spawn(color, at) {
+  const [lo, hi] = SIZE[P().size] || SIZE.medium, r = rnd(lo, hi) * S;
+  const x = at ? Math.max(bounds.left + r, Math.min(W - bounds.right - r, at.x)) : rnd(bounds.left + r, W - bounds.right - r);
+  const y = at ? Math.max(bounds.top + r, Math.min(H - bounds.bottom - r, at.y)) : rnd(bounds.top + r, bounds.top + H * 0.35);
+  balls.push({ x, y,
+               vx: 0, vy: 0,
+               r, m: r * r, w: rnd(-6, 6), a: rnd(0, 6.283), color: color.slice(), fade: 1, dying: false });
+  const b = balls[balls.length - 1], ang = rnd(0, 6.283), sp = rnd(200, 520) * S;   // 随机方向、随机速度
+  b.vx = Math.cos(ang) * sp; b.vy = Math.sin(ang) * sp;
+  trimToCap();
+}
+// 超出「球数上限」时最早的球淡出（上限调小时也会立刻生效）
+function trimToCap() {
+  const alive = balls.filter(b => !b.dying), cap = Math.max(1, Math.round(P().maxBalls || 12));
+  for (let i = 0; i < alive.length - cap; i++) alive[i].dying = true;
+}
+
+function step(dt) {
+  const T = bounds.top, B = H - bounds.bottom, L = bounds.left, R = W - bounds.right;
+  const grav = !!P().gravity, E_WALL = grav ? 0.8 : 1.0;
+  // 球躲着光标走：光标周围一圈斥力（被动感知，宿主只告诉我们光标在哪，点击照常落到 Finder）；踢出去的速度封顶
+  const m = P().avoidCursor !== false ? __ld.mouse : null, AV_R = 170 * S, AV_K = 2600 * S;
+  for (const b of balls) {
+    if (grav) b.vy += G * S * dt;
+    if (m) {
+      const dx = b.x - m.x, dy = b.y - m.y, d = Math.hypot(dx, dy) || 1;
+      if (d < AV_R + b.r) { const f = AV_K * (1 - d / (AV_R + b.r)) * dt; b.vx += dx / d * f; b.vy += dy / d * f;
+        const sp = Math.hypot(b.vx, b.vy); if (sp > V_MAX * S) { b.vx *= V_MAX * S / sp; b.vy *= V_MAX * S / sp; } }
+    }
+    b.x += b.vx * dt; b.y += b.vy * dt; b.a += b.w * dt;
+    // 四壁：法向速度反向；接触瞬间切向速度与自旋耦合（球在墙上"擦"一下）。重力模式下底边是地面：静止判定 + 滚动摩擦
+    if (b.y + b.r > B) {
+      b.y = B - b.r;
+      if (grav && b.vy <= STOP_V * S) { b.vy = 0; b.vx *= 1 - ROLL * dt; b.w = b.vx / b.r; if (Math.abs(b.vx) < 2 * S) b.vx = 0; }
+      else { b.vy = -Math.abs(b.vy) * E_WALL; b.w += (b.vx / b.r - b.w) * SPIN_K; }
+    }
+    if (b.y - b.r < T) { b.y = T + b.r; b.vy = Math.abs(b.vy) * E_WALL; b.w += (-b.vx / b.r - b.w) * SPIN_K; }
+    if (b.x - b.r < L) { b.x = L + b.r; b.vx = Math.abs(b.vx) * E_WALL; b.w += (-b.vy / b.r - b.w) * SPIN_K; }
+    if (b.x + b.r > R) { b.x = R - b.r; b.vx = -Math.abs(b.vx) * E_WALL; b.w += (b.vy / b.r - b.w) * SPIN_K; }
+  }
+  // 球与球：先按质量比分离，再沿法线施加冲量（质量 ∝ r²），切向速度差带动自旋
+  for (let i = 0; i < balls.length; i++) for (let j = i + 1; j < balls.length; j++) {
+    const a = balls[i], b = balls[j], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy), min = a.r + b.r;
+    if (d === 0 || d >= min) continue;
+    const nx = dx / d, ny = dy / d, overlap = min - d, tm = a.m + b.m;
+    a.x -= nx * overlap * (b.m / tm); a.y -= ny * overlap * (b.m / tm); b.x += nx * overlap * (a.m / tm); b.y += ny * overlap * (a.m / tm);
+    const rv = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+    if (rv > 0) continue;                       // 已在分离
+    const J = -(1 + E_BALL) * rv / (1 / a.m + 1 / b.m);
+    a.vx -= J * nx / a.m; a.vy -= J * ny / a.m; b.vx += J * nx / b.m; b.vy += J * ny / b.m;
+    const tv = (b.vx - a.vx) * -ny + (b.vy - a.vy) * nx;
+    a.w += tv / a.r * 0.15; b.w += tv / b.r * 0.15;
+  }
+}
+
+function drawBall(b, dim) {
+  const c = b.color, a = b.fade * dim;
+  // 拖尾：沿速度反方向一段渐隐的光带（零重力下没有地面阴影，用它表现速度）
+  const sp = Math.hypot(b.vx, b.vy);
+  if (sp > 1) {
+    const len = Math.min(120 * S, sp * 0.12), tx = b.x - b.vx / sp * len, ty = b.y - b.vy / sp * len;
+    const tg = ctx.createLinearGradient(b.x, b.y, tx, ty); tg.addColorStop(0, rgba(c, 0.35 * a)); tg.addColorStop(1, rgba(c, 0));
+    ctx.strokeStyle = tg; ctx.lineWidth = b.r * 1.4; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(tx, ty); ctx.stroke();
+  }
+  ctx.save(); ctx.translate(b.x, b.y);
+  // 球体：径向渐变，高光固定在左上（跟光源，不跟自旋）
+  const g = ctx.createRadialGradient(-b.r * 0.35, -b.r * 0.35, b.r * 0.1, 0, 0, b.r);
+  g.addColorStop(0, rgba(c.map(v => Math.min(255, v + 90)), a)); g.addColorStop(0.55, rgba(c, a)); g.addColorStop(1, rgba(c.map(v => v * 0.35), a));
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, b.r, 0, 7); ctx.fill();
+  // 自旋条纹：裁在球内的一条环带随角度转，让旋转看得见
+  ctx.beginPath(); ctx.arc(0, 0, b.r, 0, 7); ctx.clip(); ctx.rotate(b.a);
+  ctx.strokeStyle = `rgba(255,255,255,${0.22 * a})`; ctx.lineWidth = b.r * 0.16;
+  ctx.beginPath(); ctx.ellipse(0, 0, b.r * 0.92, b.r * 0.35, 0, 0, 7); ctx.stroke();
+  ctx.restore();
+  ctx.strokeStyle = rgba(c.map(v => Math.min(255, v + 60)), 0.35 * a); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(b.x, b.y, b.r - 0.5, 0, 7); ctx.stroke();
+}
+
+let lastNow = performance.now(); const bgc = BG.idle.slice();
+__ld.loop((t, th, st) => {
+  const now = performance.now(), dt = Math.min(0.05, (now - lastNow) / 1000); lastNow = now;
+  const ins = st.host && st.host.insets;
+  if (ins) bounds = { top: ins.top || 0, bottom: ins.bottom || 0, left: ins.left || 0, right: ins.right || 0 };
+  const pw = __ldWidgets.computePower(st.quota), ev = __ld.events(st, pw);
+  const color = PAL[st.phase] || PAL.idle;
+  if (!balls.length) spawn(color);                                  // 开场：随机生成一颗
+  if (ev.tool && P().spawnOnTool !== false) spawn(color);           // 每次真实工具调用：再来一颗，颜色 = 此刻状态色（可关）
+  const clicks = __ld.takeClicks();                                   // 旁听到的桌面点击：在点击处生成一颗（可关；不取走也要清空）
+  if (P().clickSpawn !== false) for (const c of clicks) spawn(color, c);
+  if (ev.phase) for (const b of balls) {                            // 状态切换：全场随机踢一下，速度封顶
+    const ang = rnd(0, 6.283), k = rnd(120, 260) * S; b.vx += Math.cos(ang) * k; b.vy += Math.sin(ang) * k;
+    const sp = Math.hypot(b.vx, b.vy); if (sp > V_MAX * S) { b.vx *= V_MAX * S / sp; b.vy *= V_MAX * S / sp; }
+  }
+  if (ev.recharge) for (let i = 0; i < 3; i++) spawn(color);       // 充能完成：撒三颗
+  const dim = ev.lowPower && __ld.flicker(t, pw.remain) ? 0.5 : 1;
+  trimToCap();
+  for (let i = 0; i < 4; i++) step(dt / 4);                          // 四个子步：高速下不穿墙、不叠球
+  for (let i = balls.length - 1; i >= 0; i--) { const b = balls[i]; if (b.dying) { b.fade -= dt * 1.5; if (b.fade <= 0) balls.splice(i, 1); } }
+
+  const tb = BG[st.phase] || BG.idle; for (let i = 0; i < 3; i++) bgc[i] += (tb[i] - bgc[i]) * 0.05;
+  ctx.fillStyle = rgba(bgc, 1); ctx.fillRect(0, 0, W, H);
+  // 可见桌面的边界（真实：菜单栏下沿 / Dock 上沿）：一圈淡框
+  ctx.strokeStyle = rgba(color, 0.18); ctx.lineWidth = 1;
+  ctx.strokeRect(bounds.left + 0.5, bounds.top + 0.5, W - bounds.left - bounds.right - 1, H - bounds.top - bounds.bottom - 1);
+  for (const b of balls) drawBall(b, dim);
+  __ldWidgets.draw(st, { key: color.map(v => v * 0.6), hi: color });
+});
+</script></body></html>

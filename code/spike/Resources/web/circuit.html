@@ -1,0 +1,144 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>Circuit</title><script src="ld.js"></script><script src="ld-widgets.js"></script></head>
+<body><canvas id="c"></canvas>
+<script>
+/* 电路脉冲 —— 中央一颗芯片，走线从引脚向四周伸出，电子沿走线流动。
+   电子流量随活跃度：待机零星几颗，执行工具时川流不息。
+   每次真实工具调用，芯片同时从数条走线炸出白热电子；状态切换时芯片外扩一圈方形光环。 */
+const cv = document.getElementById('c'), ctx = cv.getContext('2d', { alpha: false });
+const MONO = "'SF Mono','Menlo','Consolas',monospace";
+const SKIN = {
+  idle:     { key: [0x16,0x46,0x66], hi: [0x3c,0xb0,0xe6], tag: 'STANDBY',        cn: '待机'     },
+  thinking: { key: [0x50,0x48,0xb8], hi: [0xa0,0x98,0xff], tag: 'PROCESSING',     cn: '推理中'   },
+  running:  { key: [0x14,0x7c,0x60], hi: [0x40,0xf0,0xb8], tag: 'EXECUTING',      cn: '执行中'   },
+  waiting:  { key: [0x8c,0x54,0x10], hi: [0xff,0xb4,0x48], tag: 'AWAITING INPUT', cn: '等待指令' },
+};
+let W = 0, H = 0, S = 1, G = 26, chip = 0, traces = [], chipTraces = [], electrons = [];
+// 板面（点阵 + 全部走线）是静态的，缓存成离屏图，每帧一次 drawImage；只有配色在变（状态切换后约两秒）或尺寸变了才重绘
+const board = document.createElement('canvas'), bctx = board.getContext('2d'); let boardKey = '';
+const skin = { key: [...SKIN.idle.key], hi: [...SKIN.idle.hi] };
+const rgba = (c, a) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+const rnd = n => Math.floor(Math.random() * n);
+
+// 走线：从起点沿主方向走格，偶尔 45° 拐一步再回正，像真正的 PCB 布线；末端一个过孔
+function makeTrace(x, y, dx, dy, steps) {
+  const pts = [[x, y]]; let px = dx, py = dy;
+  for (let i = 0; i < steps; i++) {
+    const r = Math.random();
+    if (r < 0.22) { const sx = px ? px : (Math.random() < 0.5 ? 1 : -1), sy = py ? py : (Math.random() < 0.5 ? 1 : -1); x += sx * G; y += sy * G; }   // 45°
+    else if (r < 0.34 && i > 1) { const [nx, ny] = px ? [0, Math.random() < 0.5 ? 1 : -1] : [Math.random() < 0.5 ? 1 : -1, 0]; px = nx; py = ny; x += px * G; y += py * G; }   // 转向
+    else { x += px * G; y += py * G; }
+    if (x < 20 || x > W - 20 || y < 20 || y > H - 20) break;
+    pts.push([x, y]);
+  }
+  const lens = [0]; for (let i = 1; i < pts.length; i++) lens.push(lens[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  return { pts, lens, total: lens[lens.length - 1] };
+}
+function at(tr, d) {
+  const { pts, lens } = tr; let i = 1; while (i < lens.length - 1 && lens[i] < d) i++;
+  const u = (d - lens[i - 1]) / Math.max(1, lens[i] - lens[i - 1]);
+  return [pts[i - 1][0] + (pts[i][0] - pts[i - 1][0]) * u, pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * u];
+}
+function resize() {
+  W = cv.width = innerWidth; H = cv.height = innerHeight; S = Math.min(W, H) / 900;
+  G = Math.round(26 * S); chip = Math.round(Math.min(W, H) * 0.15 / G) * G;
+  const cx = W / 2, cy = H / 2, half = chip / 2, n = 7;   // 每边 7 根引脚
+  chipTraces = []; traces = [];
+  for (let k = 0; k < n; k++) {
+    const o = (k - (n - 1) / 2) * G;
+    chipTraces.push(makeTrace(cx + o, cy - half, 0, -1, 6 + rnd(12)), makeTrace(cx + o, cy + half, 0, 1, 6 + rnd(12)),
+                    makeTrace(cx - half, cy + o, -1, 0, 6 + rnd(14)), makeTrace(cx + half, cy + o, 1, 0, 6 + rnd(14)));
+  }
+  // 背景走线：不连芯片，只是板子的纹理，暗一档
+  const m = Math.round(W * H / 60000);
+  for (let i = 0; i < m; i++) { const d = rnd(4); traces.push(makeTrace(rnd(W / G) * G, rnd(H / G) * G, [1, -1, 0, 0][d], [0, 0, 1, -1][d], 4 + rnd(10))); }
+  electrons = []; boardKey = '';
+}
+addEventListener('resize', resize); resize();
+function text(str, x, y, size, alpha, weight) {
+  ctx.font = `${weight || 400} ${size * S}px ${MONO}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = rgba(skin.hi, alpha); ctx.fillText(str, x, y);
+}
+function drawTrace(c, tr, alpha, viaAlpha) {
+  c.strokeStyle = rgba(skin.key, alpha); c.beginPath();
+  tr.pts.forEach(([x, y], i) => i ? c.lineTo(x, y) : c.moveTo(x, y)); c.stroke();
+  const [x, y] = tr.pts[tr.pts.length - 1];
+  c.strokeStyle = rgba(skin.key, viaAlpha); c.beginPath(); c.arc(x, y, 2.6 * S, 0, 7); c.stroke();
+}
+function ensureBoard(glowUp, dim) {
+  const key = `${W}x${H}|${skin.key.map(v => v | 0).join(',')}|${(glowUp * 20) | 0}|${dim}`;
+  if (key === boardKey) return; boardKey = key;
+  board.width = W; board.height = H; const c = bctx;
+  c.clearRect(0, 0, W, H);
+  c.fillStyle = rgba(skin.key, 0.18); for (let x = G / 2; x < W; x += G) for (let y = G / 2; y < H; y += G) c.fillRect(x, y, 1, 1);   // 板上的点阵
+  c.lineJoin = 'round'; c.lineCap = 'round';
+  c.lineWidth = 1.2 * S; for (const tr of traces) drawTrace(c, tr, (0.22 + glowUp * 0.3) * dim, 0.3 * dim);
+  c.lineWidth = 1.6 * S; for (const tr of chipTraces) drawTrace(c, tr, (0.5 + glowUp * 0.5) * dim, 0.7 * dim);
+}
+
+const fx = { ripple: null, burst: null, boost: 0 };
+let lastNow = performance.now(), spawnAcc = 0;
+__ld.loop((t, th, st) => {
+  const target = SKIN[st.phase] || SKIN.idle;
+  for (let i = 0; i < 3; i++) { skin.key[i] += (target.key[i] - skin.key[i]) * 0.05; skin.hi[i] += (target.hi[i] - skin.hi[i]) * 0.05; }
+  const now = performance.now(), dt = Math.min(0.1, (now - lastNow) / 1000); lastNow = now;
+  const nowMs = Date.now();
+  const pw = __ldWidgets.computePower(st.quota);
+  const ev = __ld.events(st, pw);
+  const dim = ev.lowPower && __ld.flicker(t, pw.remain) ? 0.45 : 1;
+  const cx = W / 2, cy = H / 2, half = chip / 2;
+
+  // 电子：常态流量随活跃度；工具调用从芯片炸出 6 颗白热电子；充能完成每根芯片走线各来一颗
+  const speed = (80 + th.energy * 170) * S;
+  spawnAcc += (1.2 + th.energy * 12) * dt;
+  while (spawnAcc >= 1) { spawnAcc -= 1; const tr = Math.random() < 0.7 ? chipTraces[rnd(chipTraces.length)] : traces[rnd(traces.length)]; if (tr) electrons.push({ tr, d: 0, v: speed * (0.7 + Math.random() * 0.6), hot: false }); }
+  if (ev.tool) { for (let i = 0; i < 6; i++) electrons.push({ tr: chipTraces[rnd(chipTraces.length)], d: 0, v: speed * 1.9, hot: true }); fx.boost = 1; }
+  if (ev.recharge) { fx.burst = nowMs; for (const tr of chipTraces) electrons.push({ tr, d: 0, v: speed * 1.5, hot: true }); }
+  if (ev.phase) fx.ripple = nowMs;
+  if (fx.ripple && nowMs - fx.ripple > 700) fx.ripple = null;
+  if (fx.burst && nowMs - fx.burst > 1300) fx.burst = null;
+  fx.boost = Math.max(0, fx.boost - dt * 1.4);
+  const glowUp = fx.burst ? 0.5 * (1 - (nowMs - fx.burst) / 1300) : 0;
+
+  ctx.fillStyle = '#04070c'; ctx.fillRect(0, 0, W, H);
+  const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * 0.55);
+  bg.addColorStop(0, rgba(skin.key, 0.16 * dim)); bg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  ensureBoard(glowUp, dim); ctx.drawImage(board, 0, 0);
+
+  // 电子：头部发光 + 四节渐暗的尾
+  for (let i = electrons.length - 1; i >= 0; i--) {
+    const e = electrons[i]; e.d += e.v * dt;
+    if (e.d >= e.tr.total) { electrons.splice(i, 1); continue; }
+    const c = e.hot ? [255, 255, 255] : skin.hi;
+    for (let k = 4; k >= 1; k--) { const [x, y] = at(e.tr, Math.max(0, e.d - k * 5 * S)); ctx.fillStyle = rgba(c, (0.55 - k * 0.11) * dim); ctx.beginPath(); ctx.arc(x, y, (2.2 - k * 0.3) * S, 0, 7); ctx.fill(); }
+    const [x, y] = at(e.tr, e.d);
+    if (e.hot) { ctx.save(); ctx.shadowColor = rgba(c, 0.9); ctx.shadowBlur = 14 * S; ctx.fillStyle = rgba(c, 0.95 * dim); ctx.beginPath(); ctx.arc(x, y, 3 * S, 0, 7); ctx.fill(); ctx.restore(); }
+    else {
+      ctx.fillStyle = rgba(c, 0.22 * dim); ctx.beginPath(); ctx.arc(x, y, 6 * S, 0, 7); ctx.fill();   // 廉价光晕
+      ctx.fillStyle = rgba(c, 0.95 * dim); ctx.beginPath(); ctx.arc(x, y, 2.3 * S, 0, 7); ctx.fill();
+    }
+  }
+  if (electrons.length > 160) electrons.splice(0, electrons.length - 160);
+
+  // 芯片：引脚、外壳、内核发光（呼吸 + 工具调用增亮）、状态标牌
+  ctx.strokeStyle = rgba(skin.key, 0.9 * dim); ctx.lineWidth = 2 * S;
+  for (let k = 0; k < 7; k++) { const o = (k - 3) * G; for (const [x1, y1, x2, y2] of [[cx + o, cy - half, cx + o, cy - half - 6 * S], [cx + o, cy + half, cx + o, cy + half + 6 * S], [cx - half, cy + o, cx - half - 6 * S, cy + o], [cx + half, cy + o, cx + half + 6 * S, cy + o]]) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); } }
+  const breathe = 0.5 + 0.5 * Math.sin(t * 1.9), core = Math.min(1, 0.35 + 0.35 * breathe * th.pulse + fx.boost * 0.5 + glowUp);
+  ctx.fillStyle = '#060a10'; ctx.fillRect(cx - half, cy - half, chip, chip);
+  const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, half * 1.1);
+  cg.addColorStop(0, rgba(skin.hi, core * 0.55 * dim)); cg.addColorStop(0.6, rgba(skin.key, 0.25 * dim)); cg.addColorStop(1, rgba(skin.key, 0.05));
+  ctx.fillStyle = cg; ctx.fillRect(cx - half, cy - half, chip, chip);
+  ctx.save(); ctx.shadowColor = rgba(skin.hi, 0.8); ctx.shadowBlur = (12 + fx.boost * 16) * S;
+  ctx.strokeStyle = rgba(skin.hi, (0.85 + fx.boost * 0.15) * dim); ctx.lineWidth = 1.6 * S; ctx.strokeRect(cx - half, cy - half, chip, chip); ctx.restore();
+  ctx.strokeStyle = rgba(skin.key, 0.6 * dim); ctx.lineWidth = 1; ctx.strokeRect(cx - half + 8 * S, cy - half + 8 * S, chip - 16 * S, chip - 16 * S);
+  ctx.fillStyle = rgba(skin.hi, 0.8 * dim); ctx.beginPath(); ctx.arc(cx - half + 14 * S, cy - half + 14 * S, 2 * S, 0, 7); ctx.fill();   // 一号脚标记
+  text(target.tag, cx, cy - 2 * S, Math.min(15, 15 * chip / (13 * S * target.tag.length)), 0.95 * dim, 600);
+  text(target.cn, cx, cy + 18 * S, 11, 0.55 * dim);
+  if (fx.ripple) {
+    const u = (nowMs - fx.ripple) / 700, r = half + u * Math.min(W, H) * 0.3;
+    ctx.strokeStyle = rgba(skin.hi, (1 - u) * 0.6 * dim); ctx.lineWidth = 2 * S; ctx.strokeRect(cx - r, cy - r, r * 2, r * 2);
+  }
+  __ldWidgets.draw(st, skin);
+});
+</script></body></html>

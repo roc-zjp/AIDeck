@@ -1,5 +1,5 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<title>Neural</title><script src="ld.js"></script></head>
+<title>Neural</title><script src="ld.js"></script><script src="ld-widgets.js"></script></head>
 <body><canvas id="c"></canvas>
 <script>
 const cv = document.getElementById('c'), ctx = cv.getContext('2d', { alpha: false });
@@ -66,5 +66,7 @@ __ld.loop((t, th, st) => {
     ctx.beginPath(); ctx.arc(x,y,2.1,0,6.2832); ctx.fill();
   }
   if (packets.length > 260) packets.length = 260;
+  const liteHi = c => c.map(v => Math.round(v + (255 - v) * 0.65));
+  __ldWidgets.draw(st, { key: A, hi: liteHi(B) });
 });
 </script></body></html>

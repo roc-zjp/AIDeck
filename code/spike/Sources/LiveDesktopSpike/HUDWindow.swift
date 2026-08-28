@@ -43,6 +43,16 @@ final class HUDWindow: NSWindow {
         isReleasedWhenClosed = false
     }
 
+    /// 置顶悬浮：状态卡是全局状态指引，可选择盖在所有应用窗口之上（低于菜单栏与 Dock），
+    /// 并允许出现在全屏 App 的 Space 里；关闭则回到桌面图标层之上、只在桌面露出时可见。
+    /// 编辑模式进行中不动 level，结束时 setEditing(false) 会回到这里设的 normalLevel。
+    func setFloating(_ on: Bool) {
+        normalLevel = on ? .floating : NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
+        collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, on ? .fullScreenAuxiliary : .fullScreenNone]
+        if level != .floating || !on { level = normalLevel }
+        if on { orderFrontRegardless() } else { orderFront(nil) }
+    }
+
     /// 点击穿透开关：开启后状态卡不再拦截鼠标，但也就不能直接拖了
     func setClickThrough(_ on: Bool) {
         ignoresMouseEvents = on

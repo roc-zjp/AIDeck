@@ -1,0 +1,137 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>Radar</title><script src="ld.js"></script><script src="ld-widgets.js"></script></head>
+<body><canvas id="c"></canvas>
+<script>
+/* 雷达 —— 扫描臂扫过，会话作为回波点亮起。
+   回波点是真数据：每个会话一颗，方位由会话名固定（同名同位，好认），
+   离心距离 = 这个会话已经多久没有输出（对数刻度：1m / 10m / 1h / 6h 四圈），越靠外越久没动。
+   等你输入的回波不等扫描臂、一直橙色呼吸；停滞 / 已转后台的是灰点。
+   扫描转速随活跃度；每次真实工具调用从圆心发出一圈 ping。 */
+const cv = document.getElementById('c'), ctx = cv.getContext('2d', { alpha: false });
+const MONO = "'SF Mono','Menlo','Consolas',monospace";
+const SKIN = {
+  idle:     { key: [0x14,0x46,0x34], hi: [0x3c,0xbe,0x88] },
+  thinking: { key: [0x1c,0x56,0x86], hi: [0x5a,0xbe,0xf0] },
+  running:  { key: [0x18,0x76,0x3e], hi: [0x50,0xff,0x9a] },
+  waiting:  { key: [0x86,0x4e,0x10], hi: [0xff,0xb0,0x40] },
+};
+const GREY = [0x5a, 0x66, 0x62], AMBER = [0xff, 0x9a, 0x2a];
+let W = 0, H = 0, S = 1;
+const skin = { key: [...SKIN.idle.key], hi: [...SKIN.idle.hi] };
+const rgba = (c, a) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+const pad = n => String(n).padStart(2, '0');
+const dur = s => { s = Math.max(0, Math.floor(s)); return s < 3600 ? `${pad(Math.floor(s / 60))}:${pad(s % 60)}` : `${Math.floor(s / 3600)}h ${pad(Math.floor(s / 60) % 60)}m`; };
+const cols = ch => (ch.codePointAt(0) > 0x2e7f ? 2 : 1);
+function fit(s, w) { let o = '', n = 0; for (const ch of s) { const c = cols(ch); if (n + c > w) break; o += ch; n += c; } return o; }
+// 会话名 → 固定方位：同一个会话每次都在同一个方向上
+function bearing(s) { let h = 0; for (const ch of s) h = (h * 31 + ch.codePointAt(0)) >>> 0; return (h % 3600) / 3600 * Math.PI * 2; }
+// 静默时长 → 离心距离（从 1 秒起的对数）：刚有输出的在圆心附近、6h 到边；
+// 内圈留得宽（1m 已到 0.41R），几个都在干活的会话才不会挤成一团
+const RINGS = [[60, '1m'], [600, '10m'], [3600, '1h'], [21600, '6h']];
+const dist = sec => Math.min(1, Math.log(Math.max(0, sec) + 1) / Math.log(21601));
+
+function resize() { W = cv.width = innerWidth; H = cv.height = innerHeight; S = Math.min(W, H) / 900; }
+addEventListener('resize', resize); resize();
+function text(str, x, y, size, alpha, align, c) {
+  ctx.font = `${size * S}px ${MONO}`; ctx.textAlign = align || 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = rgba(c || skin.hi, alpha); ctx.fillText(str, x, y);
+}
+
+const fx = { pings: [], ring: null, burst: null };
+__ld.loop((t, th, st) => {
+  const target = SKIN[st.phase] || SKIN.idle;
+  for (let i = 0; i < 3; i++) { skin.key[i] += (target.key[i] - skin.key[i]) * 0.05; skin.hi[i] += (target.hi[i] - skin.hi[i]) * 0.05; }
+  const nowMs = Date.now();
+  const pw = __ldWidgets.computePower(st.quota);
+  const ev = __ld.events(st, pw);
+  if (ev.tool) fx.pings.push(nowMs);
+  if (ev.phase) fx.ring = nowMs;
+  if (ev.recharge) fx.burst = nowMs;
+  fx.pings = fx.pings.filter(p => nowMs - p < 900);
+  if (fx.ring && nowMs - fx.ring > 700) fx.ring = null;
+  if (fx.burst && nowMs - fx.burst > 1300) fx.burst = null;
+  const dim = ev.lowPower && __ld.flicker(t, pw.remain) ? 0.45 : 1;
+  const glowUp = fx.burst ? 0.5 * (1 - (nowMs - fx.burst) / 1300) : 0;
+
+  const cx = W / 2, cy = H / 2, R = Math.min(W, H) * 0.36;
+  ctx.fillStyle = '#020604'; ctx.fillRect(0, 0, W, H);
+  const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * 1.25);
+  bg.addColorStop(0, rgba(skin.key, 0.22 * dim)); bg.addColorStop(0.8, rgba(skin.key, 0.05)); bg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = bg; ctx.beginPath(); ctx.arc(cx, cy, R * 1.25, 0, 7); ctx.fill();
+  // 底网格
+  ctx.strokeStyle = rgba(skin.key, 0.06); ctx.lineWidth = 1; ctx.beginPath();
+  for (let x = cx % (60 * S); x < W; x += 60 * S) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+  for (let y = cy % (60 * S); y < H; y += 60 * S) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+  ctx.stroke();
+
+  // 距离圈（真实刻度：静默时长）+ 十字线 + 外圈刻度
+  ctx.lineWidth = 1;
+  for (const [sec, label] of RINGS) {
+    const r = R * dist(sec);
+    ctx.strokeStyle = rgba(skin.key, (0.5 + glowUp) * dim); ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7); ctx.stroke();
+    text(label, cx + 4 * S, cy - r - 7 * S, 9, 0.5 * dim, 'left', skin.key);
+  }
+  ctx.strokeStyle = rgba(skin.key, 0.35 * dim); ctx.beginPath();
+  ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy); ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R); ctx.stroke();
+  for (let i = 0; i < 72; i++) {
+    const a = i / 72 * Math.PI * 2, long = i % 6 === 0, r2 = R + (long ? 12 : 6) * S;
+    ctx.strokeStyle = rgba(skin.key, (long ? 0.8 : 0.35) * dim); ctx.lineWidth = long ? 1.5 : 1;
+    ctx.beginPath(); ctx.moveTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R); ctx.lineTo(cx + Math.cos(a) * r2, cy + Math.sin(a) * r2); ctx.stroke();
+  }
+
+  // 扫描臂：转速随活跃度（t 本身已按状态加速）；身后一片渐暗的扇面
+  const sweep = t * 1.3;
+  for (let i = 0; i < 40; i++) {
+    const w = 0.032, a1 = sweep - i * w, a0 = a1 - w;
+    ctx.fillStyle = rgba(skin.hi, (0.16 * (1 - i / 40) ** 1.6 + glowUp * 0.1) * dim);
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, R, a0, a1); ctx.closePath(); ctx.fill();
+  }
+  ctx.save(); ctx.shadowColor = rgba(skin.hi, 0.9); ctx.shadowBlur = 10 * S;
+  ctx.strokeStyle = rgba(skin.hi, 0.95 * dim); ctx.lineWidth = 1.6 * S;
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(sweep) * R, cy + Math.sin(sweep) * R); ctx.stroke();
+  ctx.restore();
+
+  // 回波：会话（satellites 开关关掉就只剩扫描）
+  if ((__ld.config.reactions || {}).satellites !== false) {
+    ctx.font = `${10 * S}px ${MONO}`;
+    for (const s of st.sessions || []) {
+      const name = s.nameUserSet && s.name ? s.name : (s.project || '?');
+      const a = bearing(name + (s.kind === 'bg' ? '~' : '')), r = R * dist(s.idleSeconds || 0);
+      const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+      const off = (s.stalled || s.parked), waiting = !off && s.phase === 'waiting';
+      // 扫过后亮起再慢慢暗下去；等你输入的不等扫描臂
+      const d = ((sweep - a) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+      let b = Math.exp(-d * 1.4) * 0.9 + 0.15;
+      const c = off ? GREY : waiting ? AMBER : skin.hi;
+      if (waiting) b = Math.max(b, 0.6 + 0.4 * Math.sin(t * 3 + a));
+      if (off) b = 0.45;
+      const rad = (waiting ? 4.2 + 1.4 * Math.sin(t * 3 + a) : 3.2) * S;
+      ctx.save(); if (!off) { ctx.shadowColor = rgba(c, 0.9); ctx.shadowBlur = (waiting ? 16 : 9) * S; }
+      ctx.fillStyle = rgba(c, b * dim); ctx.beginPath(); ctx.arc(x, y, rad, 0, 7); ctx.fill();
+      if (s.kind === 'bg') { ctx.strokeStyle = rgba(c, b * dim); ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(x, y, rad + 3 * S, 0, 7); ctx.stroke(); }
+      ctx.restore();
+      // 标牌：名字 + 状态；等你输入附上已等多久（真实）
+      const tag = fit(name.toUpperCase(), 14) + (s.parked ? ' · PARKED' : s.stalled ? ' · STALLED' : waiting ? ' · ' + dur(s.idleSeconds || 0) : s.phase === 'running' ? ' · EXEC' : s.phase === 'thinking' ? ' · PROC' : '');
+      const right = Math.cos(a) >= 0;
+      ctx.strokeStyle = rgba(c, 0.5 * b * dim); ctx.lineWidth = 1; ctx.beginPath();
+      ctx.moveTo(x + (right ? 6 : -6) * S, y - 6 * S); ctx.lineTo(x + (right ? 16 : -16) * S, y - 14 * S); ctx.stroke();
+      text(tag, x + (right ? 18 : -18) * S, y - 15 * S, 10, Math.min(1, b + 0.25) * dim, right ? 'left' : 'right', c);
+    }
+  }
+
+  // ping（工具调用）/ 状态切换环 / 充能爆发
+  for (const p of fx.pings) {
+    const u = (nowMs - p) / 900;
+    ctx.strokeStyle = rgba(skin.hi, (1 - u) * 0.7 * dim); ctx.lineWidth = 2 * S;
+    ctx.beginPath(); ctx.arc(cx, cy, R * u, 0, 7); ctx.stroke();
+  }
+  if (fx.ring) {
+    const u = (nowMs - fx.ring) / 700;
+    ctx.strokeStyle = rgba(skin.hi, (1 - u) * 0.6 * dim); ctx.lineWidth = 3 * S * (1 - u) + 1;
+    ctx.beginPath(); ctx.arc(cx, cy, R * (0.15 + 0.85 * u), 0, 7); ctx.stroke();
+  }
+  // 圆心
+  ctx.fillStyle = rgba(skin.hi, 0.9 * dim); ctx.beginPath(); ctx.arc(cx, cy, 2.2 * S, 0, 7); ctx.fill();
+  __ldWidgets.draw(st, skin);
+});
+</script></body></html>

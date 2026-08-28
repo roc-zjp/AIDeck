@@ -1,20 +1,21 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<title>JARVIS</title><script src="ld.js"></script></head>
+<title>JARVIS</title><script src="ld.js"></script><script src="ld-widgets.js"></script></head>
 <body><canvas id="c"></canvas>
 <script>
-/* 贾维斯式全息工作台。
-   原则：所有数字都来自真实的 Claude 会话数据，不放装饰性假数据 ——
-   否则它就退化成一张花哨壁纸，而不是一个能用的状态界面。 */
+/* 贾维斯式全息工作台 —— 本文件只负责"英雄件"：背景、反应堆、事件反应。
+   四周的信息面板由皮肤共用的小工具层（ld-widgets.js）按槽位配置绘制。
+   原则：所有数字都来自真实的 Claude 会话数据，不放装饰性假数据；
+   动效可以炫，但只对真实事件发生（工具调用、状态切换、充能完成、低电量），常态保持克制。 */
 const cv = document.getElementById('c');
 const ctx = cv.getContext('2d', { alpha: false });
 const MONO = "'SF Mono','Menlo','Consolas',monospace";
 
 // 贾维斯配色：青色为骨，状态只做色相偏移，警报态才转橙
 const SKIN = {
-  idle:     { key: [0x2e,0x7d,0x99], hi: [0x5a,0xc8,0xe8], tag: 'STANDBY',       cn: '待机'     },
-  thinking: { key: [0x6b,0x8c,0xff], hi: [0xa9,0xbe,0xff], tag: 'PROCESSING',    cn: '推理中'   },
-  running:  { key: [0x00,0xd4,0xc8], hi: [0x5a,0xff,0xe8], tag: 'EXECUTING',     cn: '执行中'   },
-  waiting:  { key: [0xff,0x95,0x00], hi: [0xff,0xc9,0x6b], tag: 'AWAITING INPUT',cn: '等待指令' },
+  idle:     { key: [0x2e,0x7d,0x99], hi: [0x5a,0xc8,0xe8], tag: 'STANDBY',        cn: '待机'     },
+  thinking: { key: [0x6b,0x8c,0xff], hi: [0xa9,0xbe,0xff], tag: 'PROCESSING',     cn: '推理中'   },
+  running:  { key: [0x00,0xd4,0xc8], hi: [0x5a,0xff,0xe8], tag: 'EXECUTING',      cn: '执行中'   },
+  waiting:  { key: [0xff,0x95,0x00], hi: [0xff,0xc9,0x6b], tag: 'AWAITING INPUT', cn: '等待指令' },
 };
 
 let W = 0, H = 0, S = 1;
@@ -40,8 +41,39 @@ function text(str, x, y, size, alpha, align, weight) {
   ctx.fillText(str, x, y);
 }
 
-/* ── 中央反应堆：环的转速与密度跟着状态能量走 ───────────────────── */
-function reactor(t, cx, cy, R, energy, pulse) {
+/* ── 事件反应：只对真实事件发生，每项可在宿主里单独开关 ──────────────
+   toolPulse       每次真实工具调用：一颗光点沿刻度环跑一圈，核心闪一下
+   phaseRipple     状态切换：一圈扩散的涟漪
+   rechargeBurst   五小时窗口重置：能量环从 0 扫到满
+   lowPowerFlicker 剩余电量 < 20%：核心偶尔暗一下，< 5% 更频繁 */
+const fx = { pulses: [], ripples: [], burst: null, lastToolTs: null, lastPhase: null, lastRemain: null, lastResetsAt: null };
+
+function updateFx(st, pw, nowMs) {
+  const on = __ld.config.reactions || {};
+  const newest = (st.recentTools || [])[0];
+  if (newest) {
+    // 最新事件的绝对时间戳变了才算新事件。基准用宿主的推送时刻（pushedAt − ago 就是事件时刻），
+    // 而不是页面时钟——否则两次推送之间页面时间在走、ago 不变，会算出假的"新事件"；允许 ±1s 取整抖动
+    const base = st.host && st.host.pushedAt ? st.host.pushedAt : nowMs / 1000;
+    const ts = Math.round(base - newest.ago);
+    if (fx.lastToolTs === null) fx.lastToolTs = ts;
+    else if (ts > fx.lastToolTs + 1) { fx.lastToolTs = ts; if (on.toolPulse) fx.pulses.push({ t0: nowMs }); }
+  }
+  if (fx.lastPhase === null) fx.lastPhase = st.phase;
+  else if (st.phase !== fx.lastPhase) { fx.lastPhase = st.phase; if (on.phaseRipple) fx.ripples.push({ t0: nowMs }); }
+  if (pw) {
+    const reset = (pw.recharged && fx.lastRemain !== null && fx.lastRemain < 100) ||
+                  (fx.lastResetsAt !== null && pw.resetsAt !== fx.lastResetsAt && pw.remain > fx.lastRemain + 20);
+    if (reset && on.rechargeBurst) fx.burst = { t0: nowMs };
+    fx.lastRemain = pw.remain; fx.lastResetsAt = pw.resetsAt;
+  }
+  fx.pulses  = fx.pulses.filter(p => nowMs - p.t0 < 900);
+  fx.ripples = fx.ripples.filter(p => nowMs - p.t0 < 700);
+  if (fx.burst && nowMs - fx.burst.t0 > 1300) fx.burst = null;
+}
+
+/* ── 中央反应堆：环的转速与密度跟着状态能量走；能量环 = 五小时额度剩余 ──── */
+function reactor(t, cx, cy, R, energy, pulse, pw, nowMs) {
   // 外刻度环：72 格，每 6 格一根长刻度
   ctx.save(); ctx.translate(cx, cy); ctx.rotate(t * 0.08);
   for (let i = 0; i < 72; i++) {
@@ -56,6 +88,15 @@ function reactor(t, cx, cy, R, energy, pulse) {
     ctx.stroke();
   }
   ctx.restore();
+
+  // 工具调用光点：沿刻度环外沿跑一圈
+  for (const p of fx.pulses) {
+    const u = (nowMs - p.t0) / 900, a = -Math.PI / 2 + u * Math.PI * 2, r = R + 10 * S;
+    glow(rgba(skin.hi, 1), 16 * S, () => {
+      ctx.fillStyle = rgba(skin.hi, 1 - u * 0.6);
+      ctx.beginPath(); ctx.arc(cx + Math.cos(a) * r, cy + Math.sin(a) * r, 3.2 * S, 0, 7); ctx.fill();
+    });
+  }
 
   // 分段弧：反向旋转，段数随活跃度增加
   const segs = 3 + Math.round(energy * 3);
@@ -80,23 +121,79 @@ function reactor(t, cx, cy, R, energy, pulse) {
   ctx.setLineDash([]);
   ctx.restore();
 
-  // 核心：呼吸，等待输入时最明显
+  // 能量环：五小时额度剩余（真实数据，来自 statusline 的 rate_limits）；没数据就不画
+  if (pw) {
+    let vis = pw.remain;
+    if (fx.burst) vis = pw.remain * Math.min(1, (nowMs - fx.burst.t0) / 900);   // 充能动画：从 0 扫到满
+    const r = R * 0.52;
+    ctx.save(); ctx.translate(cx, cy); ctx.lineCap = 'round'; ctx.lineWidth = 3 * S;
+    ctx.strokeStyle = rgba(skin.key, 0.22);
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke();
+    if (vis > 0) glow(rgba(skin.hi, 0.9), 12 * S, () => {
+      const end = -Math.PI / 2 + Math.PI * 2 * vis / 100;
+      ctx.strokeStyle = rgba(skin.hi, 0.9);
+      ctx.beginPath(); ctx.arc(0, 0, r, -Math.PI / 2, end); ctx.stroke();
+      if (fx.burst) { ctx.fillStyle = rgba(skin.hi, 1); ctx.beginPath(); ctx.arc(Math.cos(end) * r, Math.sin(end) * r, 4 * S, 0, 7); ctx.fill(); }
+    });
+    ctx.restore();
+  }
+
+  // 状态切换涟漪
+  for (const p of fx.ripples) {
+    const u = (nowMs - p.t0) / 700;
+    ctx.strokeStyle = rgba(skin.hi, (1 - u) * 0.5); ctx.lineWidth = 2 * S;
+    ctx.beginPath(); ctx.arc(cx, cy, R * (0.4 + u), 0, 7); ctx.stroke();
+  }
+
+  // 核心：呼吸，等待输入时最明显；工具光点 / 充能让它闪，低电量让它暗
+  let boost = 0, dim = 1;
+  for (const p of fx.pulses) boost += 0.35 * (1 - (nowMs - p.t0) / 900);
+  if (fx.burst) boost += 0.5 * (1 - (nowMs - fx.burst.t0) / 1300);
+  if ((__ld.config.reactions || {}).lowPowerFlicker && pw && pw.remain < 20) {
+    const rate = pw.remain < 5 ? 0.35 : 0.12;
+    const h = Math.abs(Math.sin(Math.floor(t * 9) * 12.9898) * 43758.5453) % 1;
+    if (h < rate) dim = 0.45;
+  }
   const breathe = 0.5 + 0.5 * Math.sin(t * 1.9);
   const cr = R * (0.34 + pulse * 0.07 * breathe);
   const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, cr);
-  g.addColorStop(0, rgba(skin.hi, 0.55 + 0.3 * breathe * pulse));
-  g.addColorStop(0.55, rgba(skin.key, 0.16));
+  g.addColorStop(0, rgba(skin.hi, Math.min(1, (0.55 + 0.3 * breathe * pulse + boost) * dim)));
+  g.addColorStop(0.55, rgba(skin.key, 0.16 * dim));
   g.addColorStop(1, rgba(skin.key, 0));
   ctx.fillStyle = g;
   ctx.beginPath(); ctx.arc(cx, cy, cr, 0, 7); ctx.fill();
-  ctx.strokeStyle = rgba(skin.hi, 0.5); ctx.lineWidth = 1;
+  ctx.strokeStyle = rgba(skin.hi, 0.5 * dim); ctx.lineWidth = 1;
   ctx.beginPath(); ctx.arc(cx, cy, cr, 0, 7); ctx.stroke();
 
-  // 中心状态字
   glow(rgba(skin.hi, 0.8), 16 * S, () => {
-    text(tag, cx, cy + 4 * S, 21, 0.98, 'center', 600);
+    text(tag, cx, cy + 4 * S, 21, 0.98 * dim, 'center', 600);
   });
-  text(cn, cx, cy + 30 * S, 12, 0.6, 'center');
+  text(cn, cx, cy + 30 * S, 12, 0.6 * dim, 'center');
+}
+
+/* ── 会话卫星点：环外每个会话一颗，按阶段着色（真实数据；./ld fx satellites off 可关）──
+   等你输入的卫星更大、带呼吸光晕——橙点一多，不用读字就知道该回终端了 */
+function drawSatellites(st, cx, cy, R, t) {
+  if ((__ld.config.reactions || {}).satellites === false) return;
+  const ss = (st.sessions || []).slice()
+    .sort((a, b) => ((a.name || a.project || '') < (b.name || b.project || '') ? -1 : 1));
+  if (!ss.length) return;
+  const r = R * 1.18;
+  ss.forEach((s, i) => {
+    const a = -Math.PI / 2 + t * 0.12 + i * Math.PI * 2 / ss.length;
+    const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+    // 停滞 / 已转后台的会话用暗色、无光晕（转后台的活儿由 bg 会话那颗卫星代表）
+    const c = (s.stalled || s.parked) ? SKIN.idle.key : (SKIN[s.phase] || SKIN.idle).hi;
+    const isWaiting = s.phase === 'waiting' && !s.stalled && !s.parked;
+    const breathe = isWaiting ? 0.6 + 0.4 * Math.sin(t * 3 + i) : 1;
+    // 一小段暗色轨道痕迹，让点看起来"在轨道上"而不是漂浮
+    ctx.strokeStyle = rgba(skin.key, 0.22); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(cx, cy, r, a - 0.16, a + 0.16); ctx.stroke();
+    glow(rgba(c, 0.9), (isWaiting ? 14 : 8) * S, () => {
+      ctx.fillStyle = rgba(c, isWaiting ? 0.7 + 0.3 * breathe : 0.9);
+      ctx.beginPath(); ctx.arc(x, y, (isWaiting ? 3.4 + 1.6 * breathe : 3.0) * S, 0, 7); ctx.fill();
+    });
+  });
 }
 
 /* ── 角标：四角 L 形框架 ─────────────────────────────────────── */
@@ -110,23 +207,6 @@ function corners(m, len) {
   }
 }
 
-/* ── 信息面板 ───────────────────────────────────────────────── */
-function panel(x, y, title, rows, align) {
-  const a = align || 'left';
-  ctx.strokeStyle = rgba(skin.key, 0.45); ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(a === 'left' ? x : x - 46 * S, y - 13 * S);
-  ctx.lineTo(a === 'left' ? x + 46 * S : x, y - 13 * S);
-  ctx.stroke();
-  text(title, x, y, 10, 0.55, a, 600);
-  rows.forEach((r, i) => text(r, x, y + (17 + i * 15) * S, 11, i === 0 ? 0.92 : 0.62, a));
-}
-
-const pad = n => String(n).padStart(2, '0');
-const agoStr = s => `-${pad(Math.floor(s / 60))}:${pad(s % 60)}`;
-
-let bootAt = Date.now();
-
 __ld.loop((t, th, st) => {
   const target = SKIN[st.phase] || SKIN.idle;
   for (let i = 0; i < 3; i++) {
@@ -134,6 +214,9 @@ __ld.loop((t, th, st) => {
     skin.hi[i]  += (target.hi[i]  - skin.hi[i])  * 0.05;
   }
   tag = target.tag; cn = target.cn;
+  const nowMs = Date.now();
+  const pw = __ldWidgets.computePower(st.quota);
+  updateFx(st, pw, nowMs);
 
   // 背板
   ctx.fillStyle = '#03070a'; ctx.fillRect(0, 0, W, H);
@@ -149,44 +232,8 @@ __ld.loop((t, th, st) => {
   ctx.stroke();
 
   corners(30 * S, 26 * S);
-  reactor(t, W / 2, H / 2, Math.min(W, H) * 0.20, th.energy, th.pulse);
-
-  // 左上：真实会话列表
-  const sess = (st.sessions || []).map(s =>
-    `${(s.project || '?').slice(0, 16).toUpperCase().padEnd(17)}${(SKIN[s.phase] || SKIN.idle).tag.slice(0, 9)}`);
-  panel(52 * S, 62 * S, `SESSIONS  ${st.activeSessions || 0}`,
-        sess.length ? sess : ['NO ACTIVE SESSION']);
-
-  // 右上：时钟与运行时长
-  const d = new Date();
-  const up = Math.floor((Date.now() - bootAt) / 1000);
-  panel(W - 52 * S, 62 * S, 'SYSTEM TIME', [
-    `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`,
-    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
-    `UPTIME ${pad(Math.floor(up / 3600))}:${pad(Math.floor(up / 60) % 60)}:${pad(up % 60)}`,
-  ], 'right');
-
-  // 左下：真实工具调用流
-  const logs = (st.recentTools || []).slice(0, 9).map(e =>
-    `${agoStr(Math.min(e.ago, 3599)).padEnd(8)}${e.tool.slice(0, 14).toUpperCase().padEnd(15)}${(e.project || '').slice(0, 12)}`);
-  panel(52 * S, H - 190 * S, 'ACTIVITY LOG', logs.length ? logs : ['NO RECENT ACTIVITY']);
-
-  // 右下：当前作业
-  panel(W - 52 * S, H - 190 * S, 'CURRENT TASK', [
-    (st.tool || '—').toUpperCase(),
-    (st.project || '—').toUpperCase(),
-    (st.branch || '—').toUpperCase(),
-  ], 'right');
-
-  // 活跃度条（真实：由状态能量驱动）
-  const bw = 190 * S, bx = W - 52 * S - bw, by = H - 118 * S;
-  ctx.strokeStyle = rgba(skin.key, 0.4); ctx.lineWidth = 1;
-  ctx.strokeRect(bx, by, bw, 5 * S);
-  glow(rgba(skin.hi, 0.8), 10 * S, () => {
-    ctx.fillStyle = rgba(skin.hi, 0.85);
-    ctx.fillRect(bx, by, bw * Math.min(1, th.energy), 5 * S);
-  });
-  text('LOAD', bx - 8 * S, by + 6 * S, 9, 0.5, 'right');
+  reactor(t, W / 2, H / 2, Math.min(W, H) * 0.20, th.energy, th.pulse, pw, nowMs);
+  drawSatellites(st, W / 2, H / 2, Math.min(W, H) * 0.20, t);
 
   // 扫描线
   const sy = ((t * 0.07) % 1) * H;
@@ -196,5 +243,8 @@ __ld.loop((t, th, st) => {
   sg.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.fillStyle = sg; ctx.fillRect(0, sy - 60 * S, W, 120 * S);
   ctx.fillStyle = rgba(skin.hi, 0.16); ctx.fillRect(0, sy, W, 1);
+
+  // 四周小工具：槽位由宿主偏好决定；英雄件已画大能量环，POWER 小工具只出读数
+  __ldWidgets.draw(st, skin, { heroShowsPower: true });
 });
 </script></body></html>

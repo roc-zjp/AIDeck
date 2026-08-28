@@ -1,5 +1,5 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<title>Pulse</title><script src="ld.js"></script></head>
+<title>Pulse</title><script src="ld.js"></script><script src="ld-widgets.js"></script></head>
 <body><canvas id="c"></canvas>
 <script>
 /* 最省电的一款：只有几十次绘制调用，适合电池模式 / 长时间挂机 */
@@ -8,7 +8,7 @@ let W=0,H=0;
 function resize(){ W=cv.width=innerWidth; H=cv.height=innerHeight; }
 addEventListener('resize', resize); resize();
 
-__ld.loop((t, th) => {
+__ld.loop((t, th, st) => {
   const cx=W/2, cy=H/2, R=Math.hypot(W,H)/2;
   const g = ctx.createRadialGradient(cx,cy,0,cx,cy,R);
   g.addColorStop(0, __ld.css(__ld.lerp ? th.bg : th.bg));
@@ -43,5 +43,7 @@ __ld.loop((t, th) => {
   for (let x=cx%step; x<W; x+=step){ ctx.moveTo(x,0); ctx.lineTo(x,H); }
   for (let y=cy%step; y<H; y+=step){ ctx.moveTo(0,y); ctx.lineTo(W,y); }
   ctx.stroke();
+  const liteHi = c => c.map(v => Math.round(v + (255 - v) * 0.65));
+  __ldWidgets.draw(st, { key: th.a, hi: liteHi(th.b) });
 });
 </script></body></html>

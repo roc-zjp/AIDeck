@@ -1,0 +1,148 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>Globe</title><script src="ld.js"></script><script src="ld-widgets.js"></script></head>
+<body><canvas id="c"></canvas>
+<script>
+/* 全息地球 —— 投影台上悬着一颗旋转的线框星球。
+   转速随活跃度；每个会话是一条绕球的轨道，轨道上的标记按会话状态运行：执行中跑得快、推理中中速、
+   等你输入的慢转并橙色呼吸、停滞 / 已转后台的停在原地发灰（真实数据，./ld fx satellites off 可关）。
+   每次真实工具调用，一束光沿赤道绕球一圈；状态切换时球体外扩一圈光环。 */
+const cv = document.getElementById('c'), ctx = cv.getContext('2d', { alpha: false });
+const MONO = "'SF Mono','Menlo','Consolas',monospace";
+const SKIN = {
+  idle:     { key: [0x1a,0x52,0x80], hi: [0x48,0xb4,0xe8], tag: 'STANDBY',        cn: '待机'     },
+  thinking: { key: [0x5a,0x52,0xc0], hi: [0xa4,0x9c,0xff], tag: 'PROCESSING',     cn: '推理中'   },
+  running:  { key: [0x14,0x86,0x86], hi: [0x40,0xf0,0xd8], tag: 'EXECUTING',      cn: '执行中'   },
+  waiting:  { key: [0x90,0x56,0x10], hi: [0xff,0xb4,0x48], tag: 'AWAITING INPUT', cn: '等待指令' },
+};
+const GREY = [0x60, 0x6a, 0x78], AMBER = [0xff, 0x9a, 0x2a];
+let W = 0, H = 0, S = 1;
+const skin = { key: [...SKIN.idle.key], hi: [...SKIN.idle.hi] };
+const rgba = (c, a) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+const cols = ch => (ch.codePointAt(0) > 0x2e7f ? 2 : 1);
+function fit(s, w) { let o = '', n = 0; for (const ch of s) { const c = cols(ch); if (n + c > w) break; o += ch; n += c; } return o; }
+function resize() { W = cv.width = innerWidth; H = cv.height = innerHeight; S = Math.min(W, H) / 900; }
+addEventListener('resize', resize); resize();
+function text(str, x, y, size, alpha, align, c, weight) {
+  ctx.font = `${weight || 400} ${size * S}px ${MONO}`; ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = rgba(c || skin.hi, alpha); ctx.fillText(str, x, y);
+}
+
+// 球面几何：单位球，绕 Y 自转 rot，再绕 X 倾斜 23.4°，正交投影；返回 [x, y, depth]，depth>0 朝向观众
+const TILT = 23.4 * Math.PI / 180, ST = Math.sin(TILT), CT = Math.cos(TILT);
+function proj(lat, lon, rot) {
+  const cp = Math.cos(lat), x = cp * Math.sin(lon + rot), y = Math.sin(lat), z = cp * Math.cos(lon + rot);
+  return [x, y * CT - z * ST, y * ST + z * CT];
+}
+// 经纬线与均布点（斐波那契球）只算一次角度，每帧只做旋转投影
+const LINES = [];
+for (let m = 0; m < 12; m++) { const pts = []; for (let k = 0; k <= 30; k++) pts.push([(-90 + k * 6) * Math.PI / 180, m * 30 * Math.PI / 180]); LINES.push(pts); }
+for (const latDeg of [-60, -30, 0, 30, 60]) { const pts = []; for (let k = 0; k <= 60; k++) pts.push([latDeg * Math.PI / 180, k * 6 * Math.PI / 180]); LINES.push(pts); }
+const DOTS = []; { const N = 520, ga = Math.PI * (3 - Math.sqrt(5)); for (let i = 0; i < N; i++) { const y = 1 - (i / (N - 1)) * 2; DOTS.push([Math.asin(y), (ga * i) % (Math.PI * 2)]); } }
+
+function polyline(pts, rot, cx, cy, R, front) {
+  ctx.beginPath(); let pen = false;
+  for (const [lat, lon] of pts) {
+    const [x, y, d] = proj(lat, lon, rot);
+    if (front && d < 0) { pen = false; continue; }
+    const sx = cx + x * R, sy = cy - y * R;
+    if (pen) ctx.lineTo(sx, sy); else { ctx.moveTo(sx, sy); pen = true; }
+  }
+  ctx.stroke();
+}
+
+const fx = { arcs: [], ring: null, burst: null };
+__ld.loop((t, th, st) => {
+  const target = SKIN[st.phase] || SKIN.idle;
+  for (let i = 0; i < 3; i++) { skin.key[i] += (target.key[i] - skin.key[i]) * 0.05; skin.hi[i] += (target.hi[i] - skin.hi[i]) * 0.05; }
+  const nowMs = Date.now();
+  const pw = __ldWidgets.computePower(st.quota);
+  const ev = __ld.events(st, pw);
+  if (ev.tool) fx.arcs.push(nowMs);
+  if (ev.phase) fx.ring = nowMs;
+  if (ev.recharge) fx.burst = nowMs;
+  fx.arcs = fx.arcs.filter(p => nowMs - p < 900);
+  if (fx.ring && nowMs - fx.ring > 700) fx.ring = null;
+  if (fx.burst && nowMs - fx.burst > 1300) fx.burst = null;
+  const dim = ev.lowPower && __ld.flicker(t, pw.remain) ? 0.45 : 1;
+  const boost = fx.burst ? 0.6 * (1 - (nowMs - fx.burst) / 1300) : 0;
+
+  // 球体略偏上、半径 0.21：底部标牌与底排小工具（bc 槽的 POWER）之间要留出空隙
+  const cx = W / 2, cy = H / 2 - 30 * S, R = Math.min(W, H) * 0.21, rot = t * 0.55;
+  ctx.fillStyle = '#030609'; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = rgba(skin.key, 0.06); ctx.lineWidth = 1; ctx.beginPath();
+  for (let x = cx % (70 * S); x < W; x += 70 * S) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+  for (let y = cy % (70 * S); y < H; y += 70 * S) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+  ctx.stroke();
+
+  // 投影台：球下方两圈椒圆 + 向上的光锥
+  const by = cy + R * 1.42, brx = R * 0.95, bry = R * 0.16;
+  const cone = ctx.createLinearGradient(0, by, 0, cy);
+  cone.addColorStop(0, rgba(skin.key, 0.22 * dim)); cone.addColorStop(1, rgba(skin.key, 0));
+  ctx.fillStyle = cone; ctx.beginPath(); ctx.moveTo(cx - brx * 0.55, by); ctx.lineTo(cx - R * 0.9, cy); ctx.lineTo(cx + R * 0.9, cy); ctx.lineTo(cx + brx * 0.55, by); ctx.closePath(); ctx.fill();
+  for (const [k, a] of [[1, 0.7], [0.72, 0.4], [0.35, 0.25]]) {
+    ctx.strokeStyle = rgba(skin.key, (a + boost * 0.3) * dim); ctx.lineWidth = k === 1 ? 1.6 : 1;
+    ctx.beginPath(); ctx.ellipse(cx, by, brx * k, bry * k, 0, 0, 7); ctx.stroke();
+  }
+  ctx.save(); ctx.translate(cx, by); ctx.rotate(-t * 0.3); ctx.scale(1, bry / brx); ctx.setLineDash([6 * S, 9 * S]);
+  ctx.strokeStyle = rgba(skin.hi, 0.35 * dim); ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(0, 0, brx * 0.86, 0, 7); ctx.stroke(); ctx.restore();
+
+  // 会话轨道：先画整条轨道与背面的标记，球画完再补正面的标记
+  const showOrbits = (__ld.config.reactions || {}).satellites !== false;
+  const orbits = showOrbits ? (st.sessions || []).map((s, i) => {
+    const name = s.nameUserSet && s.name ? s.name : (s.project || '?');
+    const off = s.stalled || s.parked, waiting = !off && s.phase === 'waiting';
+    const w = off ? 0 : s.phase === 'running' ? 1.5 : s.phase === 'thinking' ? 0.9 : 0.35;
+    const tilt = (i * 0.62 + 0.4) % Math.PI, r = R * (1.3 + i * 0.09), th0 = i * 1.7 + t * w;
+    const lx = Math.cos(th0) * r, ly = Math.sin(th0) * r * 0.26;
+    return { name, off, waiting, tilt, r, c: off ? GREY : waiting ? AMBER : skin.hi, front: Math.sin(th0) >= 0,
+             x: cx + lx * Math.cos(tilt) - ly * Math.sin(tilt), y: cy + lx * Math.sin(tilt) + ly * Math.cos(tilt), kind: s.kind };
+  }) : [];
+  function marker(o) {
+    const br = o.waiting ? 0.6 + 0.4 * Math.sin(t * 3 + o.r) : 1;
+    const rad = (o.waiting ? 3.6 + 1.4 * br : 3) * S;
+    ctx.save(); if (!o.off) { ctx.shadowColor = rgba(o.c, 0.9); ctx.shadowBlur = (o.waiting ? 16 : 8) * S; }
+    ctx.fillStyle = rgba(o.c, (o.off ? 0.5 : o.front ? 0.95 : 0.4) * dim); ctx.beginPath(); ctx.arc(o.x, o.y, rad, 0, 7); ctx.fill();
+    if (o.kind === 'bg') { ctx.strokeStyle = rgba(o.c, 0.7 * dim); ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(o.x, o.y, rad + 3 * S, 0, 7); ctx.stroke(); }
+    ctx.restore();
+    if (o.front) text(fit(o.name.toUpperCase(), 14) + (o.waiting ? ' ·' : ''), o.x + 9 * S, o.y - 9 * S, 10, 0.85 * dim, 'left', o.c);
+  }
+  for (const o of orbits) {
+    ctx.strokeStyle = rgba(o.c, (o.off ? 0.12 : 0.22) * dim); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.ellipse(cx, cy, o.r, o.r * 0.26, o.tilt, 0, 7); ctx.stroke();
+    if (!o.front) marker(o);
+  }
+
+  // 球体：背面线暗、正面线亮、均布点只画朝向观众的一半；核心一团光随呼吸
+  const g = ctx.createRadialGradient(cx - R * 0.25, cy - R * 0.25, 0, cx, cy, R);
+  g.addColorStop(0, rgba(skin.key, (0.32 + boost) * dim)); g.addColorStop(1, rgba(skin.key, 0.08 * dim));
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, R, 0, 7); ctx.fill();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = rgba(skin.key, 0.28 * dim); for (const l of LINES) polyline(l, rot, cx, cy, R, false);
+  ctx.strokeStyle = rgba(skin.hi, (0.55 + boost * 0.4) * dim); for (const l of LINES) polyline(l, rot, cx, cy, R, true);
+  ctx.fillStyle = rgba(skin.hi, 0.75 * dim);
+  for (const [lat, lon] of DOTS) { const [x, y, d] = proj(lat, lon, rot); if (d > 0.05) { ctx.globalAlpha = d * 0.8; ctx.fillRect(cx + x * R - 1, cy - y * R - 1, 2, 2); } }
+  ctx.globalAlpha = 1;
+  ctx.save(); ctx.shadowColor = rgba(skin.hi, 0.8); ctx.shadowBlur = 18 * S;
+  ctx.strokeStyle = rgba(skin.hi, (0.8 + boost) * dim); ctx.lineWidth = 1.4 * S; ctx.beginPath(); ctx.arc(cx, cy, R, 0, 7); ctx.stroke(); ctx.restore();
+
+  // 工具调用：一束光沿赤道绕一圈（正面可见，转到背面变暗）
+  for (const p of fx.arcs) {
+    const u = (nowMs - p) / 900;
+    for (let k = 0; k < 7; k++) {
+      const [x, y, d] = proj(0, -rot + (u - k * 0.012) * Math.PI * 2, rot);
+      ctx.fillStyle = rgba([255, 255, 255], (1 - u) * (1 - k / 7) * (d > 0 ? 1 : 0.25) * dim);
+      ctx.beginPath(); ctx.arc(cx + x * R, cy - y * R, (3.2 - k * 0.3) * S, 0, 7); ctx.fill();
+    }
+  }
+  for (const o of orbits) if (o.front) marker(o);
+  if (fx.ring) {
+    const u = (nowMs - fx.ring) / 700;
+    ctx.strokeStyle = rgba(skin.hi, (1 - u) * 0.6 * dim); ctx.lineWidth = 2 * S;
+    ctx.beginPath(); ctx.arc(cx, cy, R * (1 + u * 0.9), 0, 7); ctx.stroke();
+  }
+  // 状态标牌：投影台下方
+  text(target.tag, cx, by + 30 * S, 15, 0.9 * dim, 'center', skin.hi, 600);
+  text(target.cn, cx, by + 50 * S, 11, 0.55 * dim, 'center', skin.hi);
+  __ldWidgets.draw(st, skin);
+});
+</script></body></html>

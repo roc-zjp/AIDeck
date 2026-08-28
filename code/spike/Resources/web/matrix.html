@@ -1,0 +1,116 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>Matrix</title><script src="ld.js"></script><script src="ld-widgets.js"></script></head>
+<body><canvas id="c"></canvas>
+<script>
+/* 数据雨 —— 竖排字符瀑布。
+   雨里滚的不全是乱码：每一列落下来时有三成几率带着一串"真话"——真实的工具名 / 会话名 / 分支名
+   （来自 st.recentTools / st.sessions / st.repos），用亮色排出；其余字符只是雨滴纹理，不假装是数据。
+   工具调用发生的那一刻，这个工具的名字会从屏幕中央附近落下一列白热的雨。
+   活跃度决定雨的密度与速度：待机是细雨，执行工具时是暴雨。 */
+const cv = document.getElementById('c'), ctx = cv.getContext('2d', { alpha: false });
+const MONO = "'SF Mono','Menlo','Consolas',monospace";
+// 绿色为骨，状态做色相偏移；警报态（等你输入）转琥珀，与其他皮肤同一套语义
+const SKIN = {
+  idle:     { key: [0x14,0x52,0x30], hi: [0x46,0xb8,0x6a], bg: [0x02,0x05,0x03] },
+  thinking: { key: [0x1a,0x62,0x76], hi: [0x5a,0xd2,0xe0], bg: [0x02,0x05,0x08] },
+  running:  { key: [0x1c,0x84,0x3a], hi: [0x7c,0xff,0x8a], bg: [0x02,0x07,0x03] },
+  waiting:  { key: [0x8a,0x52,0x10], hi: [0xff,0xb8,0x4a], bg: [0x07,0x04,0x01] },
+};
+const GLYPHS = 'ｦｧｨｩｪｫｬｭｮｯｰｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789<>/=+-*#$@%&';
+let W = 0, H = 0, S = 1, F = 16, cols = [], vignette = null;
+const skin = { key: [...SKIN.idle.key], hi: [...SKIN.idle.hi], bg: [...SKIN.idle.bg] };
+const rgba = (c, a) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+const rnd = n => Math.floor(Math.random() * n);
+
+// 一列雨：y 以"行"计，v 行/秒；word 是这列要排出的真话，hot 是白热列（刚发生的工具调用）
+function reset(c, i, soon) {
+  c.x = i * F + F / 2; c.y = soon ? -rnd(6) : -6 - rnd(90); c.v = 5 + Math.random() * 6;
+  c.word = null; c.wi = 0; c.hot = false; c.last = -999; c.ch = '';
+  return c;
+}
+function resize() {
+  W = cv.width = innerWidth; H = cv.height = innerHeight; S = Math.min(W, H) / 900;
+  F = Math.max(12, Math.round(17 * S));
+  cols = Array.from({ length: Math.ceil(W / F) }, (_, i) => reset({}, i, false));
+  ctx.fillStyle = rgba(skin.bg, 1); ctx.fillRect(0, 0, W, H);
+  // 四角压暗：小工具落在角上，给文字留可读的底
+  vignette = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.hypot(W, H) * 0.6);
+  vignette.addColorStop(0, 'rgba(0,0,0,0)'); vignette.addColorStop(1, 'rgba(0,0,0,0.09)');
+}
+addEventListener('resize', resize); resize();
+
+// 真实词表：工具名、会话名、分支名——全部来自状态；没数据就只有雨滴
+function vocab(st) {
+  const v = [];
+  for (const e of st.recentTools || []) v.push(e.tool);
+  for (const s of st.sessions || []) v.push(s.nameUserSet && s.name ? s.name : s.project);
+  for (const r of st.repos || []) v.push(r.branch);
+  return v.filter(Boolean).map(w => String(w).toUpperCase());
+}
+
+let lastNow = performance.now(), flash = null;
+__ld.loop((t, th, st) => {
+  const target = SKIN[st.phase] || SKIN.idle;
+  for (let i = 0; i < 3; i++) {
+    skin.key[i] += (target.key[i] - skin.key[i]) * 0.05;
+    skin.hi[i]  += (target.hi[i]  - skin.hi[i])  * 0.05;
+    skin.bg[i]  += (target.bg[i]  - skin.bg[i])  * 0.05;
+  }
+  const now = performance.now(), dt = Math.min(0.1, (now - lastNow) / 1000); lastNow = now;
+  const nowMs = Date.now();
+  const pw = __ldWidgets.computePower(st.quota);
+  const ev = __ld.events(st, pw);
+  const words = vocab(st);
+  const dim = ev.lowPower && __ld.flicker(t, pw.remain) ? 0.4 : 1;
+
+  // 拖尾：整屏向背景色淡一点，不清屏——雨滴自然留下渐暗的尾巴
+  ctx.fillStyle = rgba(skin.bg, 0.07); ctx.fillRect(0, 0, W, H);
+
+  // 工具调用：中央附近选一列，立刻以白热高速落下这个工具的名字
+  if (ev.tool && cols.length) {
+    const i = Math.max(0, Math.min(cols.length - 1, (cols.length >> 1) + rnd(13) - 6));
+    const c = reset(cols[i], i, true);
+    c.y = 0; c.v = 26; c.hot = true; c.word = String((st.recentTools[0] || {}).tool || '').toUpperCase();
+  }
+  if (ev.phase || ev.recharge) flash = { t0: nowMs, dur: ev.recharge ? 1300 : 700 };
+
+  ctx.font = `${F}px ${MONO}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const tempo = 0.6 + th.energy * 1.1;   // 活跃度：雨速倍率
+  for (let i = 0; i < cols.length; i++) {
+    const c = cols[i];
+    c.y += c.v * tempo * dt * (c.hot ? 1.6 : 1);
+    const row = Math.floor(c.y);
+    if (row === c.last) continue;
+    c.last = row;
+    const y = row * F + F / 2;
+    if (y > H + F) {
+      // 落到底：活跃时马上再来，待机时歇一会；三成几率带一串真话
+      reset(c, i, Math.random() < 0.25 + th.energy * 0.6);
+      if (words.length && Math.random() < 0.3) c.word = words[rnd(words.length)];
+      continue;
+    }
+    if (y < -F) continue;
+    // 上一格：把刚才的头字符重画成体色（真话用 hi、雨滴用 key），形成"头亮身暗"
+    if (c.ch) { ctx.fillStyle = c.hot || c.wordCh ? rgba(skin.hi, 0.95 * dim) : rgba(skin.key, 0.95 * dim); ctx.fillText(c.ch, c.x, y - F); }
+    let ch, hot = c.hot, isWord = false;
+    if (c.word && c.wi < c.word.length) { ch = c.word[c.wi++]; isWord = true; }
+    else { ch = GLYPHS[rnd(GLYPHS.length)]; c.word = null; }
+    c.ch = ch; c.wordCh = isWord;
+    ctx.fillStyle = hot || isWord ? rgba([255, 255, 255], 0.95 * dim) : rgba(skin.hi, 0.85 * dim);
+    ctx.fillText(ch, c.x, y);
+  }
+  ctx.fillStyle = vignette; ctx.fillRect(0, 0, W, H);
+
+  // 状态切换 / 充能完成：一对横向亮线从中央扫向上下两端
+  if (flash) {
+    const u = (nowMs - flash.t0) / flash.dur;
+    if (u >= 1) flash = null;
+    else {
+      const a = (1 - u) * 0.55, d = u * H / 2;
+      ctx.fillStyle = rgba(skin.hi, a); ctx.fillRect(0, H / 2 - d, W, 1.5); ctx.fillRect(0, H / 2 + d, W, 1.5);
+      if (flash.dur > 1000) { ctx.fillStyle = rgba(skin.hi, a * 0.12); ctx.fillRect(0, 0, W, H); }
+    }
+  }
+  __ldWidgets.draw(st, skin);
+});
+</script></body></html>

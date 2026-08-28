@@ -35,9 +35,11 @@ def scenario(label, args):
     p = subprocess.Popen([BIN]+args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(5)
     pids = {p.pid} | (webkit_pids() - before)
-    t0, c0 = time.time(), cputime(pids)
+    # 逐进程记起点，结束时只累加两端都存活的进程：窗口内退出的进程 ps 查不到会记 0，整体差值会被倒扣成负数（2026-08-27 踩过）
+    t0, c0 = time.time(), {q: cputime({q}) for q in pids}
     time.sleep(SECS)
-    dt, dc = time.time()-t0, cputime(pids)-c0
+    dt = time.time()-t0
+    dc = sum(cputime({q}) - v for q, v in c0.items() if subprocess.run(['ps','-p',str(q)],capture_output=True).returncode == 0)
     pct = dc/dt*100
     print(f"{label:34s} {pct:6.2f}% CPU   ({dc:.2f}s / {dt:.0f}s)", flush=True)
     stop()

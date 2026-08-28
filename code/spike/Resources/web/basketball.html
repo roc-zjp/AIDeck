@@ -1,0 +1,724 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>Basketball</title><script src="ld.js"></script><script src="ld-widgets.js"></script><script src="three.bundle.js"></script><script src="ld-3d.js"></script>
+<style>#bg,#gl,#ui{position:fixed;left:0;top:0;}</style></head>
+<body><canvas id="bg"></canvas><canvas id="gl"></canvas><canvas id="ui"></canvas>
+<script>
+/* 空气篮球（3D 全息）—— 黑暗虚空里一位数字人在练干拔：没有球场，篮筐悬在空中，每球随机换位置、换机位。
+   数字人 = 用户在设置页选的 3D 模型（~/.config/live-desktop/models/*.fbx|glb，如 Mixamo 导出的角色）：
+   只借它的网格与人形骨架（按骨名识别 Hips / Spine* / Neck / Head / 左右 Arm·ForeArm·Hand·UpLeg·Leg·Foot），
+   动作全部由本皮肤程序化驱动——双臂双腿两段式 IK（世界坐标最小旋转，不依赖骨的局部轴向，所以任何人形骨架都能接），
+   躯干前倾 / 转体、头部注视、脚踩地不穿地。模型不是人形（或没选模型）时回落到内置程序化角色。全息渲染同 hologram 皮肤（菲涅尔 + 扫描线 + 线框）。
+   与状态的绑定：思考 / 执行 = 运球（执行中换手更快、转身更大），等你输入 = 停球转身看着你（琥珀、记分牌 SHOT CLOCK 亮），
+   空闲 = 持球站立；投篮 = agent 真实里程碑：普通跳投 = 一个回合完成（会话从思考/执行转入「等你输入」，Claude 把球交回给你）；特殊庆祝 = git commit（全场闪光 + 记分牌 SCORE+1 + 标出仓库，SCORE = 本次运行真实 commit 数）。
+   → 收球干拔 → 最高点出手 → 后旋飞行 → 空心入网、篮网荡开 → 落地自然回弹（恢复系数 0.62 + 滚动摩擦，弹到停稳）→ 黑场切镜头；
+   每次投篮前先来一段过人套路：左右晃人 ×2 → 胯下 ×2 → 收球干拔。长时间没有回合 / commit 时默认每 10 秒兜底投一次（autoShoot，可关）。抛物线按目标弧顶反解，每球必进。声音暂不做（onSwish() 预留）。
+   记分牌只有真数：全局状态、场上会话数、五小时额度、SHOT CLOCK（等待最久的会话等了多久）、当前驱动数字人的模型名。 */
+const THREE = window.LD_THREE && LD_THREE.THREE;
+const bg = document.getElementById('bg'), bctx = bg.getContext('2d', { alpha: false });
+const glc = document.getElementById('gl'), ui = document.getElementById('ui'), uctx = ui.getContext('2d');
+const MONO = "'SF Mono','Menlo','Consolas',monospace", TAU = Math.PI * 2;
+const PAL = { idle: [0x4c,0xb8,0xf0], thinking: [0xa8,0xa0,0xff], running: [0x44,0xf4,0xdc], waiting: [0xff,0xb6,0x4a] };
+const KEY = { idle: [0x1c,0x5a,0x8c], thinking: [0x5c,0x54,0xc4], running: [0x14,0x88,0x88], waiting: [0x92,0x58,0x12] };
+const PHASE_WORD = { idle: 'STANDBY', thinking: 'PROCESSING', running: 'EXECUTING', waiting: 'AWAITING' };
+const rgba = (c, a) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a === undefined ? 1 : a})`;
+const rnd = (a, b) => a + Math.random() * (b - a), clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const ease = u => u < 0 ? 0 : u > 1 ? 1 : u * u * (3 - 2 * u), easeOut = u => 1 - (1 - clamp(u, 0, 1)) ** 2;
+const pad = n => String(n).padStart(2, '0');
+const clockStr = s => { s = Math.max(0, Math.floor(s)); return s < 3600 ? `${pad(Math.floor(s / 60))}:${pad(s % 60)}` : `${Math.floor(s / 3600)}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`; };
+function lift(c) { const m = Math.max(c[0], c[1], c[2]); if (m >= 0xa0) return c; const k = m > 0 ? 0xd8 / m : 1; return c.map(v => Math.min(255, v * k + 40)); }
+const sessLabel = s => (s.nameUserSet && s.name ? s.name : (s.project || '?')) + (s.kind === 'bg' ? ' ~' : '');
+let W = 0, H = 0, S = 1, bounds = { top: 0, bottom: 0, left: 0, right: 0 };
+
+__ld.declarePrefs([
+  { id: 'camera',     name: '机位',   type: 'choice', default: 'random', options: [{ id: 'random', name: '每球随机' }, { id: 'side', name: '侧面（看弧线）' }, { id: 'behind', name: '球员背后' }] },
+  { id: 'scoreboard', name: '记分牌', type: 'bool',   default: true },
+  { id: 'toolTag',    name: '飞行中标出工具名', type: 'bool', default: true },
+  { id: 'autoShoot',  name: '没有工具调用时也每 10 秒投一次', type: 'bool', default: true },
+  { id: 'particles',  name: '空中尘埃粒子', type: 'bool', default: true },
+]);
+const P = () => __ld.config.skin;
+
+/* ── 渲染器 / 场景（全息材质不吃灯光，场景里没有灯） ─────────────────────── */
+let renderer = null, glErr = THREE ? null : 'three.bundle.js 未加载';
+if (THREE) try {
+  renderer = new THREE.WebGLRenderer({ canvas: glc, alpha: true, antialias: true, premultipliedAlpha: true, powerPreference: 'low-power' });
+  renderer.setPixelRatio(1); renderer.setClearColor(0x000000, 0);
+} catch (e) { glErr = String(e && e.message || e); }
+const scene = THREE && new THREE.Scene();
+const camera = THREE && new THREE.PerspectiveCamera(44, 1, 0.1, 200);
+function resize() {
+  W = innerWidth; H = innerHeight; bg.width = ui.width = W; bg.height = ui.height = H; S = Math.min(W, H) / 900;
+  if (renderer) renderer.setSize(W, H, false); else { glc.width = W; glc.height = H; }
+  if (camera) { camera.aspect = W / H; camera.updateProjectionMatrix(); }
+}
+addEventListener('resize', resize); resize();
+const V3 = () => new THREE.Vector3(), Q4 = () => new THREE.Quaternion();
+const UP = THREE && new THREE.Vector3(0, 1, 0);
+
+/* ── 全息材质（与 ld-3d.js 同一套着色：菲涅尔边缘光 + 扫描线 + 扫描面；顶点阶段带蒙皮） ─────── */
+const VERT = `
+  #include <common>
+  #include <skinning_pars_vertex>
+  varying vec3 vN; varying vec3 vV; varying float vY;
+  void main() {
+    #include <beginnormal_vertex>
+    #include <skinbase_vertex>
+    #include <skinnormal_vertex>
+    #include <begin_vertex>
+    #include <skinning_vertex>
+    vec4 wp = modelMatrix * vec4(transformed, 1.0);
+    vec4 mv = modelViewMatrix * vec4(transformed, 1.0);
+    vN = normalize(normalMatrix * objectNormal); vV = normalize(-mv.xyz); vY = wp.y;
+    gl_Position = projectionMatrix * mv;
+  }`;
+const FRAG = `
+  uniform vec3 uColor; uniform float uAlpha, uTime, uScanY, uLine, uBase;
+  varying vec3 vN; varying vec3 vV; varying float vY;
+  void main() {
+    float ping = exp(-abs(vY - uScanY) * 30.0);
+    if (uLine > 0.5) { gl_FragColor = vec4(uColor * (1.0 + ping), uAlpha * (1.0 + ping * 0.8)); return; }
+    float fres = pow(1.0 - abs(dot(normalize(vN), normalize(vV))), 2.2);
+    float scan = 0.80 + 0.20 * sin(gl_FragCoord.y * 0.8 - uTime * 7.0);
+    float a = (uBase + 0.50 * fres) * scan + ping * 0.9;
+    gl_FragColor = vec4(uColor * (1.0 + ping * 0.8), a * uAlpha);
+  }`;
+const shared = THREE && { uTime: { value: 0 }, uScanY: { value: -99 }, uAlpha: { value: 1 } };
+const keyColor = THREE && new THREE.Color(), hiColor = THREE && new THREE.Color();
+function holoMaterial(color, line, wireframe, base, alphaUniform) {
+  return new THREE.ShaderMaterial({
+    vertexShader: VERT, fragmentShader: FRAG,
+    uniforms: { uColor: { value: color }, uLine: { value: line ? 1 : 0 }, uBase: { value: base == null ? 0.08 : base }, uTime: shared.uTime, uScanY: shared.uScanY, uAlpha: alphaUniform || shared.uAlpha },
+    transparent: true, depthWrite: false, depthTest: false, wireframe: !!wireframe, side: THREE.DoubleSide,
+    blending: THREE.CustomBlending, blendEquation: THREE.AddEquation,
+    blendSrc: THREE.SrcAlphaFactor, blendDst: THREE.OneFactor, blendSrcAlpha: THREE.OneFactor, blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
+  });
+}
+const solidMat = THREE && holoMaterial(keyColor, false, false), lineMat = THREE && holoMaterial(hiColor, true, false), wireMat = THREE && holoMaterial(hiColor, true, true);
+const panelMat = THREE && holoMaterial(keyColor, false, false, 0.05);
+const gripMat = THREE && holoMaterial(hiColor, true, false, 0, { value: 0.9 });   // 抓球手：独立透明度，始终可见
+// 给一个对象套全息材质：静态网格加特征线框（EdgesGeometry），蒙皮网格用同骨架的 wireframe 副本；线框透明度按线段总数自适应
+function holographize(obj) {
+  const add = []; let tris = 0, skinned = false;
+  obj.traverse(o => {
+    if (!o.isMesh) return;
+    o.material = solidMat; o.frustumCulled = false;
+    const g = o.geometry, n = g.index ? g.index.count / 3 : g.attributes.position.count / 3; tris += n;
+    if (o.isSkinnedMesh) { skinned = true; const w = o.clone(); w.material = wireMat; add.push([o.parent, w]); }
+    else add.push([o, new THREE.LineSegments(new THREE.EdgesGeometry(g, n > 2500 ? 28 : 1), lineMat)]);
+  });
+  for (const [parent, child] of add) parent.add(child);
+  let segs = 0; obj.traverse(o => { if (o.isLineSegments) segs += o.geometry.attributes.position.count / 2; if (o.isMesh && o.material === wireMat) segs += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count); });
+  wireMat.uniforms.uAlpha = { value: Math.max(0.12, Math.min(0.8, 0.8 * 1200 / Math.max(1, segs))) };
+  return { tris: Math.round(tris), skinned };
+}
+
+/* ── 纹理 ─────── */
+function ballTexture() {
+  const c = document.createElement('canvas'); c.width = 1024; c.height = 512; const x = c.getContext('2d');
+  x.fillStyle = '#e8681c'; x.fillRect(0, 0, 1024, 512);
+  for (let i = 0; i < 12000; i++) { x.fillStyle = Math.random() < 0.5 ? 'rgba(0,0,0,0.09)' : 'rgba(255,200,140,0.1)'; x.fillRect(Math.random() * 1024, Math.random() * 512, 3, 3); }
+  x.fillStyle = '#2a1006'; x.fillRect(0, 252, 1024, 9); for (const u of [0, 256, 512, 768, 1020]) x.fillRect(u - 4, 0, 9, 512);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+function radialTexture(inner, mid) {
+  const c = document.createElement('canvas'); c.width = c.height = 256; const x = c.getContext('2d');
+  const g = x.createRadialGradient(128, 128, 2, 128, 128, 126); g.addColorStop(0, inner); g.addColorStop(0.5, mid); g.addColorStop(1, 'rgba(0,0,0,0)');
+  x.fillStyle = g; x.fillRect(0, 0, 256, 256); return new THREE.CanvasTexture(c);
+}
+
+/* ── 场景物件：尘埃、脚下光池 + 光环、悬空篮筐（篮圈 + 篮网 + 全息篮板）、球、软阴影 ─────── */
+const world = {};
+// 抓球手：单位球（半径 BR）上五根会弯曲包住球的手指（四指 + 拇指），palm 法向 = 局部 +Y。放在球心、把 +Y 对到"手→球"方向即像抓住球
+function makeGripHand() {
+  const r = 0.12, pts = [];
+  const onBall = (phi, az, k) => [k * r * Math.sin(phi) * Math.cos(az), k * r * Math.cos(phi), k * r * Math.sin(phi) * Math.sin(az)];
+  const seg = (a, b) => pts.push(a[0], a[1], a[2], b[0], b[1], b[2]);
+  const F = [{ az: -0.95, p: [0.5, 1.5] }, { az: -0.33, p: [0.42, 1.62] }, { az: 0.33, p: [0.42, 1.62] }, { az: 0.95, p: [0.5, 1.5] }, { az: 2.55, p: [0.7, 1.45] }];   // 末位 = 拇指（对侧）
+  let prevKnuckle = null;
+  F.forEach((fg, i) => {
+    const p0 = onBall(fg.p[0], fg.az, 1.06), p1 = onBall((fg.p[0] + fg.p[1]) / 2, fg.az, 1.12), p2 = onBall(fg.p[1], fg.az, 1.04);
+    seg(p0, p1); seg(p1, p2);                                                   // 每指两节，弯过球面
+    if (prevKnuckle && i < 4) seg(prevKnuckle, p0);                             // 掌背连四指指根
+    prevKnuckle = i < 4 ? p0 : prevKnuckle;
+  });
+  const g = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+  const m = new THREE.LineSegments(g, gripMat); m.frustumCulled = false; m.visible = false; return m;
+}
+function buildWorld() {
+  const N = 420, pp = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) { pp[i * 3] = rnd(-9, 9); pp[i * 3 + 1] = rnd(0.2, 6.5); pp[i * 3 + 2] = rnd(-9, 9); }
+  world.dust = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(pp, 3)),
+    new THREE.PointsMaterial({ color: 0xffffff, size: 0.045, transparent: true, opacity: 0.35, depthWrite: false, sizeAttenuation: true }));
+  scene.add(world.dust);
+  world.pool = new THREE.Mesh(new THREE.PlaneGeometry(4.2, 4.2), new THREE.MeshBasicMaterial({ map: radialTexture('rgba(255,255,255,0.55)', 'rgba(255,255,255,0.12)'), transparent: true, depthWrite: false, color: 0x4cb8f0 }));
+  world.pool.rotation.x = -Math.PI / 2; world.pool.position.y = 0.002; scene.add(world.pool);
+  const ringPts = []; for (let i = 0; i <= 96; i++) { const a = i / 96 * TAU; ringPts.push(Math.cos(a) * 1.15, 0.004, Math.sin(a) * 1.15); }
+  world.ring = new THREE.Line(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(ringPts, 3)), lineMat); scene.add(world.ring);
+  // 篮筐组：局部原点 = 篮圈中心，+z 朝球员，篮板在 -z
+  const hoop = new THREE.Group();
+  const ORANGE = 0xff7a1e, STEEL = 0x454b55;
+  // 篮圈：粗管橙色钢环（NBA 内径 0.45m），16×72 段更圆润
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(0.225, 0.017, 16, 72), new THREE.MeshBasicMaterial({ color: ORANGE }));
+  rim.rotation.x = Math.PI / 2; hoop.add(rim);
+  // 鹅颈连接架：篮板上的安装板 + 水平连接臂 + 斜撑，钢灰，合并成一个 mesh
+  const m4 = (x, y, z, rx) => new THREE.Matrix4().compose(new THREE.Vector3(x, y, z), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), rx || 0), new THREE.Vector3(1, 1, 1));
+  const connGeos = [                                                             // 安装板 / 水平臂 / 斜撑，合并成一个钢灰 mesh
+    [new THREE.BoxGeometry(0.22, 0.17, 0.03), m4(0, 0.01, -0.356)],
+    [new THREE.BoxGeometry(0.075, 0.05, 0.16), m4(0, 0.005, -0.285)],
+    [new THREE.BoxGeometry(0.05, 0.15, 0.028), m4(0, -0.075, -0.31, -0.55)],
+  ].map(([g, mx]) => g.toNonIndexed().applyMatrix4(mx));
+  let cn = 0; for (const g of connGeos) cn += g.attributes.position.count;
+  const cpos = new Float32Array(cn * 3), cnrm = new Float32Array(cn * 3); let coff = 0;
+  for (const g of connGeos) { cpos.set(g.attributes.position.array, coff * 3); cnrm.set(g.attributes.normal.array, coff * 3); coff += g.attributes.position.count; g.dispose(); }
+  const cgeo = new THREE.BufferGeometry(); cgeo.setAttribute('position', new THREE.BufferAttribute(cpos, 3)); cgeo.setAttribute('normal', new THREE.BufferAttribute(cnrm, 3));
+  hoop.add(new THREE.Mesh(cgeo, new THREE.MeshBasicMaterial({ color: STEEL })));
+  // 篮板玻璃（全息半透明）
+  const board = new THREE.Mesh(new THREE.PlaneGeometry(1.83, 1.07), panelMat); board.position.set(0, 0.385, -0.375); hoop.add(board);
+  // 篮板边框（全息青）：外框 + 内衬一圈，框感更足
+  const fl = [], seg = (x0, y0, x1, y1, z) => fl.push(x0, y0, z, x1, y1, z);
+  const rect = (hw, yb, yt, z) => { seg(-hw, yb, hw, yb, z); seg(hw, yb, hw, yt, z); seg(hw, yt, -hw, yt, z); seg(-hw, yt, -hw, yb, z); };
+  rect(0.915, -0.15, 0.92, -0.373); rect(0.878, -0.113, 0.883, -0.371);          // 外框 + 内衬
+  hoop.add(new THREE.LineSegments(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(fl, 3)), lineMat));
+  // 命中方框（shooting square，橙色瞄准框，篮圈正上方 0.59×0.45）
+  const sq = [], sseg = (x0, y0, x1, y1) => sq.push(x0, y0, -0.369, x1, y1, -0.369);
+  sseg(-0.295, 0, 0.295, 0); sseg(0.295, 0, 0.295, 0.45); sseg(0.295, 0.45, -0.295, 0.45); sseg(-0.295, 0.45, -0.295, 0);
+  hoop.add(new THREE.LineSegments(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(sq, 3)), new THREE.LineBasicMaterial({ color: ORANGE, transparent: true, opacity: 0.9 })));
+  // 篮网：16 股 6 圈锥形收口，菱形交织 + 两道横向织环，白色
+  const NN = 16, rings = [
+    { y: 0, r: 0.225 }, { y: -0.085, r: 0.203 }, { y: -0.17, r: 0.177 },
+    { y: -0.255, r: 0.149 }, { y: -0.335, r: 0.116 }, { y: -0.41, r: 0.086 }], idx = [];
+  for (let k = 0; k < rings.length - 1; k++) for (let i = 0; i < NN; i++) idx.push(k * NN + i, (k + 1) * NN + i, k * NN + i, (k + 1) * NN + (i + NN - 1) % NN);
+  for (let i = 0; i < NN; i++) idx.push((rings.length - 1) * NN + i, (rings.length - 1) * NN + (i + 1) % NN);   // 网底收口环
+  for (const k of [1, 3]) for (let i = 0; i < NN; i++) idx.push(k * NN + i, k * NN + (i + 1) % NN);               // 两道横向织环
+  const pos = new Float32Array(rings.length * NN * 3), ng = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(pos, 3)); ng.setIndex(idx);
+  const net = new THREE.LineSegments(ng, new THREE.LineBasicMaterial({ color: 0xf4f6f8, transparent: true, opacity: 0.82 })); hoop.add(net);
+  world.hoop = hoop; world.net = { mesh: net, rings, N: NN, pos, hit: rings.map(() => -1e9), dirty: true }; scene.add(hoop); updateNet(0);
+  world.ball = new THREE.Mesh(new THREE.SphereGeometry(0.12, 28, 20), new THREE.MeshBasicMaterial({ map: ballTexture() })); scene.add(world.ball);
+  const bt = radialTexture('rgba(0,0,0,0.9)', 'rgba(0,0,0,0.45)'), mk = () => { const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: bt, transparent: true, depthWrite: false })); m.rotation.x = -Math.PI / 2; m.position.y = 0.003; scene.add(m); return m; };
+  world.ballShadow = mk(); world.playerShadow = mk();
+  world.grip = { L: makeGripHand(), R: makeGripHand() }; scene.add(world.grip.L, world.grip.R);
+}
+function updateNet(nowS) {
+  const { rings, N, pos, hit } = world.net; let active = false;
+  rings.forEach((rg, k) => {
+    const dtn = nowS - hit[k], e = dtn < 2.4 ? Math.exp(-dtn * 2.6) * Math.cos(dtn * 11) : 0; if (e) active = true;
+    const r = rg.r * (1 + 0.35 * Math.max(0, e) + 0.12 * Math.abs(e)), y = rg.y - 0.09 * e * (k / 3);
+    for (let i = 0; i < N; i++) { const a = (i + (k % 2) * 0.5) / N * TAU, j = (k * N + i) * 3; pos[j] = Math.cos(a) * r; pos[j + 1] = y; pos[j + 2] = Math.sin(a) * r; }
+  });
+  if (active || world.net.dirty) { world.net.mesh.geometry.attributes.position.needsUpdate = true; world.net.dirty = active; }
+}
+
+/* ── 通用骨架工具：世界坐标下的最小旋转 / 平移，不依赖骨的局部轴向 ─────── */
+const _v = Array.from({ length: 12 }, () => THREE && V3()), _q = THREE && Q4(), _q2 = THREE && Q4(), _q3 = THREE && Q4(), _m = THREE && new THREE.Matrix4();
+function rotateWorld(bone, dq) {            // 让骨（及其子树）在世界里绕自身原点转 dq：L' = P⁻¹ · dq · P · L
+  const P = bone.parent.getWorldQuaternion(_q2), Pinv = _q3.copy(P).invert();
+  bone.quaternion.premultiply(P).premultiply(dq).premultiply(Pinv);
+}
+function translateWorld(bone, d) {          // 世界位移换算进父骨局部（除掉父级缩放）
+  const P = bone.parent.getWorldQuaternion(_q2).invert(), s = bone.parent.getWorldScale(_v[11]);
+  bone.position.add(_v[10].copy(d).applyQuaternion(P).divide(s));
+}
+/* 两段式 IK：b1（上段）- b2（下段）- b3（末端）。给末端目标点 target 与"关节外张方向" pole（肘尖 / 膝盖朝向），
+   用余弦定理定关节位置，再对 b1、b2 各做一次"当前方向 → 目标方向"的最小旋转 */
+function solveLimb(b1, b2, b3, target, pole) {
+  const S = b1.getWorldPosition(_v[0]), E = b2.getWorldPosition(_v[1]), Hd = b3.getWorldPosition(_v[2]);
+  const L1 = E.distanceTo(S), L2 = Hd.distanceTo(E);
+  const d = _v[3].copy(target).sub(S); let dist = d.length(); const max = (L1 + L2) * 0.995;
+  if (dist > max) { d.multiplyScalar(max / dist); dist = max; } if (dist < 0.05) { d.set(0, -0.05, 0); dist = 0.05; }
+  const dir = _v[4].copy(d).normalize();
+  const n = _v[5].copy(pole).addScaledVector(dir, -pole.dot(dir)); if (n.lengthSq() < 1e-6) n.set(0, 0, 1).addScaledVector(dir, -dir.z); n.normalize();
+  const cosA = clamp((L1 * L1 + dist * dist - L2 * L2) / (2 * L1 * dist), -1, 1), alpha = Math.acos(cosA);
+  const Enew = _v[6].copy(S).addScaledVector(dir, L1 * Math.cos(alpha)).addScaledVector(n, L1 * Math.sin(alpha));
+  _q.setFromUnitVectors(_v[7].copy(E).sub(S).normalize(), _v[8].copy(Enew).sub(S).normalize()); rotateWorld(b1, _q);
+  const E2 = b2.getWorldPosition(_v[1]), H2 = b3.getWorldPosition(_v[2]);
+  _q.setFromUnitVectors(_v[7].copy(H2).sub(E2).normalize(), _v[8].copy(target).sub(E2).normalize()); rotateWorld(b2, _q);
+}
+function axisQ(axis, angle) { return _q.setFromAxisAngle(axis, angle).clone(); }
+
+/* ── 数字人 A：外部人形模型（按骨名识别：Mixamo / Biped / VRM / Blender 等常见命名） ─────── */
+// Three 的 FBXLoader 会把骨名里的 ":" "." 去掉（mixamorig:Hips → mixamorigHips），所以先归一化再剥常见前缀，再按"部位 + 左右"分类
+const PARTS = { arm: 'upperArm', upperarm: 'upperArm', forearm: 'foreArm', lowerarm: 'foreArm', hand: 'hand', upleg: 'upLeg', upperleg: 'upLeg', thigh: 'upLeg',
+                leg: 'leg', lowerleg: 'leg', shin: 'leg', calf: 'leg', foot: 'foot', toebase: 'toe', toe: 'toe', shoulder: 'shoulder', clavicle: 'shoulder' };
+const CENTER = { hips: 'hips', hip: 'hips', pelvis: 'hips', neck: 'neck', head: 'head' };
+function classifyBone(name) {
+  let n = String(name).toLowerCase().replace(/^.*[:|]/, '').replace(/[_.\s-]/g, '').replace(/^(mixamorig|bip01|jbip|valvebiped|b|def)/, '');
+  if (/^c(hips|hip|pelvis|neck|head|spine\d*)$/.test(n)) n = n.slice(1);                    // VRM：J_Bip_C_Hips
+  if (CENTER[n]) return { part: CENTER[n] };
+  if (/^spine\d*$/.test(n)) return { part: 'spine' };
+  if (/^neck\d*$/.test(n)) return { part: 'neck' };
+  let side = null, core = n;
+  if (n.startsWith('left')) { side = 'L'; core = n.slice(4); } else if (n.startsWith('right')) { side = 'R'; core = n.slice(5); }
+  else if (n.endsWith('left')) { side = 'L'; core = n.slice(0, -4); } else if (n.endsWith('right')) { side = 'R'; core = n.slice(0, -5); }
+  else if (/[lr]$/.test(n) && PARTS[n.slice(0, -1)]) { side = n.endsWith('l') ? 'L' : 'R'; core = n.slice(0, -1); }
+  else if (/^[lr]/.test(n) && PARTS[n.slice(1)]) { side = n[0] === 'l' ? 'L' : 'R'; core = n.slice(1); }
+  return side && PARTS[core] ? { part: PARTS[core], side } : null;
+}
+function makeRigChar(loaded, label) {
+  const obj = loaded.object, B = { L: {}, R: {}, spine: [] };
+  const depth = o => { let d = 0; while (o.parent) { o = o.parent; d++; } return d; };
+  const found = [], skel = new Set();                                       // FBXLoader 会给出重名的两套骨；只认真正驱动蒙皮的那套
+  obj.traverse(o => { if (o.isSkinnedMesh && o.skeleton) o.skeleton.bones.forEach(b => skel.add(b)); });
+  obj.traverse(o => {
+    if (!o.isBone || (skel.size && !skel.has(o))) return; const c = classifyBone(o.name); if (!c) return; found.push(o.name);
+    if (c.part === 'spine') B.spine.push(o);
+    else if (!c.side) { if (!B[c.part]) B[c.part] = o; }
+    else if (!B[c.side][c.part]) B[c.side][c.part] = o;
+  });
+  B.found = found;
+  B.spine.sort((a, b) => depth(a) - depth(b));
+  const need = ['upperArm', 'foreArm', 'hand', 'upLeg', 'leg', 'foot'];
+  if (!B.hips || !B.head || !['L', 'R'].every(s => need.every(k => B[s][k]))) return null;
+  // 归一化：高 1.98m、脚底 y=0、水平居中；面朝 +z（脚尖方向判定，否则默认 +z）
+  obj.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(obj), size = box.getSize(V3()), center = box.getCenter(V3()), k = 1.98 / (size.y || 1);
+  const inner = new THREE.Group(); inner.add(obj); inner.scale.setScalar(k); inner.position.set(-center.x * k, -box.min.y * k, -center.z * k);
+  const root = new THREE.Group(); root.add(inner); root.updateMatrixWorld(true);
+  if (B.L.toe && B.R.toe) {
+    const f = B.L.foot.getWorldPosition(V3()).add(B.R.foot.getWorldPosition(V3())), t = B.L.toe.getWorldPosition(V3()).add(B.R.toe.getWorldPosition(V3()));
+    if (t.z - f.z < 0) { root.remove(inner); const flip = new THREE.Group(); flip.rotation.y = Math.PI; flip.add(inner); root.add(flip); root.updateMatrixWorld(true); }
+  }
+  const info = holographize(obj);
+  // 静止姿态：每根骨的局部变换；脚的朝向、脚的落点（相对 root）；头的正前方（头局部）
+  const rest = new Map(); obj.traverse(o => { if (o.isBone) rest.set(o, { p: o.position.clone(), q: o.quaternion.clone() }); });
+  const footQ = { L: B.L.foot.getWorldQuaternion(Q4()), R: B.R.foot.getWorldQuaternion(Q4()) };
+  const footP = { L: B.L.foot.getWorldPosition(V3()), R: B.R.foot.getWorldPosition(V3()) };
+  const headFwd = V3().set(0, 0, 1).applyQuaternion(B.head.getWorldQuaternion(Q4()).invert());
+  const hipsY = B.hips.getWorldPosition(V3()).y;
+  function setPose(p) {
+    for (const [b, r] of rest) { b.position.copy(r.p); b.quaternion.copy(r.q); }
+    root.updateMatrixWorld(true);
+    const right = _v[9].set(1, 0, 0).applyQuaternion(root.quaternion), fwd = V3().set(0, 0, 1).applyQuaternion(root.quaternion);
+    translateWorld(B.hips, V3().set(0, -0.24 * p.squat + p.jump, 0));
+    const n = B.spine.length || 1, tq = (kl, kt, ks) => axisQ(fwd, p.side * ks).multiply(axisQ(UP, p.twist * kt)).multiply(axisQ(right, p.lean * kl));
+    rotateWorld(B.hips, tq(0.3, 0.35, 0.35));
+    for (const s of B.spine) rotateWorld(s, tq(0.5 / n, 0.5 / n, 0.35 / n));
+    const split = p.stance || 0;
+    for (const s of ['L', 'R']) {                                                   // 腿：脚踩在静止落点（跟着 root 转）；胯下时前后分腿；起跳随身体升、脚尖略下垂
+      const target = root.localToWorld(footP[s].clone().add(new THREE.Vector3(0, 0, s === 'L' ? split * 0.34 : -split * 0.30)));
+      target.y += p.jump; if (p.air) target.add(V3().set(0, 0.06, -0.08).applyQuaternion(root.quaternion));
+      solveLimb(B[s].upLeg, B[s].leg, B[s].foot, target, fwd);
+      const P = B[s].foot.parent.getWorldQuaternion(_q2).invert(), want = _q3.copy(root.quaternion).multiply(footQ[s]);
+      if (p.air) want.premultiply(axisQ(right, 0.35));
+      B[s].foot.quaternion.copy(P.multiply(want));
+    }
+    for (const s of ['L', 'R']) {                                                   // 臂：手心目标 → 腕目标（沿肩→手方向退 9cm）
+      const palm = p.h[s], Sp = B[s].upperArm.getWorldPosition(_v[0]);
+      const wrist = V3().copy(palm).add(_v[1].copy(Sp).sub(palm).normalize().multiplyScalar(0.09));
+      solveLimb(B[s].upperArm, B[s].foreArm, B[s].hand, wrist, p.o[s]);
+    }
+    // 头（颈分担 35%）：当前正前方 → 目标方向的最小旋转，最多转 75°
+    const look = (bone, share) => {
+      const Hp = bone.getWorldPosition(_v[0]), cur = _v[1].copy(headFwd).applyQuaternion(B.head.getWorldQuaternion(_q2)), to = _v[2].copy(p.look).sub(Hp).normalize();
+      _q.setFromUnitVectors(cur, to); const ang = 2 * Math.acos(clamp(_q.w, -1, 1)); const f = share * Math.min(1, 1.3 / Math.max(1e-3, ang));
+      rotateWorld(bone, _q3.copy(_q).slerp(_q2.identity(), 1 - f).clone());
+    };
+    if (B.neck) look(B.neck, 0.35); look(B.head, 1);
+  }
+  return { root, setPose, kind: 'model', label, tris: info.tris, hipsY, dispose() { obj.traverse(o => { if (o.geometry) o.geometry.dispose(); }); } };
+}
+
+/* ── 数字人 B（回落）：程序化人形，17 根骨一个 SkinnedMesh，同样套全息材质 ─────── */
+function makeBuiltinChar() {
+  const bones = {}, list = [];
+  const Bn = (name, parent, x, y, z) => { const b = new THREE.Bone(); b.name = name; b.position.set(x, y, z); if (parent) bones[parent].add(b); bones[name] = b; b.userData.i = list.length; list.push(b); return b; };
+  Bn('hips', null, 0, 0.98, 0); Bn('spine', 'hips', 0, 0.2, 0); Bn('chest', 'spine', 0, 0.24, 0); Bn('neck', 'chest', 0, 0.23, 0); Bn('head', 'neck', 0, 0.08, 0);
+  for (const [s, sg] of [['L', 1], ['R', -1]]) {
+    Bn('shoulder' + s, 'chest', sg * 0.25, 0.18, 0); Bn('elbow' + s, 'shoulder' + s, 0, -0.32, 0); Bn('hand' + s, 'elbow' + s, 0, -0.30, 0);
+    Bn('hip' + s, 'hips', sg * 0.11, -0.05, 0); Bn('knee' + s, 'hip' + s, 0, -0.47, 0); Bn('ankle' + s, 'knee' + s, 0, -0.40, 0);
+  }
+  const parts = [];
+  const cap = (r, a, b, bone, scale) => { const A = new THREE.Vector3(...a), Bv = new THREE.Vector3(...b), d = Bv.clone().sub(A), len = d.length();
+    parts.push({ geo: new THREE.CapsuleGeometry(r, len, 4, 14), matrix: new THREE.Matrix4().compose(A.add(Bv).multiplyScalar(0.5), new THREE.Quaternion().setFromUnitVectors(UP, d.normalize()), new THREE.Vector3(...(scale || [1, 1, 1]))), bone }); };
+  const sph = (r, at, bone, scale) => parts.push({ geo: new THREE.SphereGeometry(r, 18, 14), matrix: new THREE.Matrix4().compose(new THREE.Vector3(...at), new THREE.Quaternion(), new THREE.Vector3(...(scale || [1, 1, 1]))), bone });
+  const bx = (sx, sy, sz, at, bone) => parts.push({ geo: new THREE.BoxGeometry(sx, sy, sz), matrix: new THREE.Matrix4().makeTranslation(...at), bone });
+  bx(0.34, 0.27, 0.24, [0, 0.86, 0], 'hips'); cap(0.17, [0, 1.02, 0], [0, 1.36, 0], 'spine', [1, 1, 0.68]); cap(0.15, [-0.13, 1.57, 0], [0.13, 1.57, 0], 'chest', [1, 1, 0.75]);
+  cap(0.05, [0, 1.62, 0], [0, 1.75, 0], 'neck'); sph(0.115, [0, 1.85, 0.01], 'head', [1, 1.08, 1.02]);
+  for (const [s, sg] of [['L', 1], ['R', -1]]) {
+    cap(0.055, [sg * 0.25, 1.6, 0], [sg * 0.25, 1.28, 0], 'shoulder' + s); cap(0.047, [sg * 0.25, 1.28, 0], [sg * 0.25, 0.98, 0], 'elbow' + s); sph(0.062, [sg * 0.25, 0.91, 0.01], 'hand' + s);
+    cap(0.085, [sg * 0.11, 0.93, 0], [sg * 0.11, 0.46, 0], 'hip' + s); cap(0.06, [sg * 0.11, 0.46, 0], [sg * 0.11, 0.06, 0], 'knee' + s); bx(0.11, 0.09, 0.28, [sg * 0.11, 0.045, 0.06], 'ankle' + s);
+  }
+  const geos = parts.map(p => { const g = p.geo.toNonIndexed(); g.applyMatrix4(p.matrix); return g; });
+  let n = 0; for (const g of geos) n += g.attributes.position.count;
+  const pos = new Float32Array(n * 3), nrm = new Float32Array(n * 3), si = new Uint16Array(n * 4), sw = new Float32Array(n * 4); let off = 0;
+  parts.forEach((p, k) => { const g = geos[k], c = g.attributes.position.count; pos.set(g.attributes.position.array, off * 3); nrm.set(g.attributes.normal.array, off * 3);
+    for (let i = 0; i < c; i++) { si[(off + i) * 4] = bones[p.bone].userData.i; sw[(off + i) * 4] = 1; } off += c; g.dispose(); p.geo.dispose(); });
+  const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.BufferAttribute(pos, 3)); geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+  geo.setAttribute('skinIndex', new THREE.BufferAttribute(si, 4)); geo.setAttribute('skinWeight', new THREE.BufferAttribute(sw, 4));
+  const mesh = new THREE.SkinnedMesh(geo, solidMat); mesh.add(bones.hips); mesh.bind(new THREE.Skeleton(list)); mesh.frustumCulled = false;
+  const root = new THREE.Group(); root.add(mesh); holographize(root);
+  const legs = (q, air) => { const t1 = air ? 0.22 : 0.9 * q, t2 = air ? 0.5 : 1.55 * q, ank = air ? 0.25 : t1 - t2;
+    for (const [s, sg] of [['L', 1], ['R', -1]]) { bones['hip' + s].rotation.set(-t1, 0, sg * 0.07); bones['knee' + s].rotation.set(t2, 0, 0); bones['ankle' + s].rotation.set(ank, 0, -sg * 0.07); }
+    return 0.11 + 0.47 * Math.cos(t1) + 0.40 * Math.cos(t2 - t1); };
+  function setPose(p) {
+    bones.hips.position.y = legs(p.squat, p.air) + p.jump;
+    const split = p.stance || 0;
+    if (split) { bones.hipL.rotation.x -= split * 0.5; bones.ankleL.rotation.x += split * 0.4; bones.hipR.rotation.x += split * 0.45; bones.ankleR.rotation.x -= split * 0.35; }
+    bones.hips.rotation.set(p.lean * 0.4, p.twist * 0.5, p.side * 0.5); bones.spine.rotation.set(p.lean * 0.4, p.twist * 0.5, p.side * 0.5); bones.chest.rotation.set(p.lean * 0.2, 0, 0);
+    for (const s of ['L', 'R']) { bones['shoulder' + s].quaternion.identity(); bones['elbow' + s].rotation.set(0, 0, 0); }
+    root.updateMatrixWorld(true);
+    for (const s of ['L', 'R']) solveLimb(bones['shoulder' + s], bones['elbow' + s], bones['hand' + s], p.h[s], p.o[s]);
+    const Hp = bones.head.getWorldPosition(_v[0]); _m.lookAt(p.look, Hp, UP); _q.setFromRotationMatrix(_m);
+    bones.head.parent.getWorldQuaternion(_q2).invert(); bones.head.quaternion.slerp(_q2.multiply(_q), 0.2);
+  }
+  return { root, setPose, kind: 'builtin', label: 'BUILT-IN', tris: Math.round(n / 3), hipsY: 0.98, dispose() { geo.dispose(); } };
+}
+
+/* ── 数字人管理：优先用设置页选的模型；它不是人形（或是内置程序化模型）时，自动在用户模型目录里找一个人形来用；都没有才回落内置角色 ─────── */
+let ch = null, modelName = null, modelErr = null, loading = false, loadedName = '', autoPicked = false;
+function useChar(c) { if (ch) { scene.remove(ch.root); ch.dispose(); } ch = c; scene.add(c.root); }
+const prettyName = n => decodeURIComponent(String(n).replace(/^user\//, '').replace(/\.(glb|gltf|fbx)$/i, '').replace(/^https?:\/\/.*\//, ''));
+async function tryLoad(name) {
+  const m = await __ld3d.loadModel(name);
+  const c = makeRigChar(m, prettyName(name));
+  if (!c) { m.object.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
+  return c;
+}
+function ensureModel(name) {
+  if (name === modelName || loading) return;
+  loading = true; const want = name;
+  (async () => {
+    const builtinNames = (__ld3d && __ld3d.builtin) || [];
+    let c = null, why = null;
+    if (want && !builtinNames.includes(want)) {
+      try { c = await tryLoad(want); if (!c) why = '不是人形骨架'; } catch (e) { why = String(e && e.message || e); }
+    } else why = want ? `${want} 是内置几何体` : '未选模型';
+    autoPicked = false;
+    if (!c) {                                                                 // 自动挑一个人形：用户模型目录里逐个试
+      let list = []; try { list = (await __ld3d.listModels()).filter(n => n.startsWith('user/') && /\.(glb|gltf|fbx)$/i.test(n) && n !== want); } catch (e) { /* 浏览器里没有宿主 */ }
+      for (const n of list) { try { c = await tryLoad(n); } catch (e) { c = null; } if (c) { autoPicked = true; break; } }
+    }
+    if (c) { useChar(c); loadedName = c.label; modelErr = c && autoPicked ? `${prettyName(want || '')}${why ? '（' + why + '）' : ''}，改用 ${c.label}` : null; }
+    else { if (!ch || ch.kind !== 'builtin') useChar(makeBuiltinChar()); loadedName = ''; modelErr = `${why || ''}；模型目录里也没有人形模型（放一个 Mixamo 角色 .fbx 进 ~/.config/live-desktop/models）`; }
+  })().finally(() => { modelName = want; loading = false; });
+}
+
+/* ── 玩法状态机（球员在原点，篮筐每球随机换位） ─────── */
+const G = { mode: 'hold', hoop: THREE && new THREE.Vector3(0, 3.05, 7.8), yaw: 0, yawT: 0, sway: 0,
+            comboT: 0, comboSeg: null, comboTau: 0, bodyX: 0, restT: 0,
+            drib: { phi: 0, side: -1, next: -1, count: 0 }, shot: null, queue: 0, shots: 0, lastShotAt: performance.now() / 1000, pendingTag: '',
+            cam: { ang: 0, D: 10, h: 2.6, drift: 1, pos: THREE && V3(), look: THREE && V3() },
+            ballMode: 'hand', ballPos: THREE && V3(), ballVel: THREE && V3(), ballFade: 1, tag: '', fade: 0, fadeDir: 0, swishAt: -1e9, dropT: 0, burstAt: null,
+            prevPhase: {}, seenCommitAt: 0, commitBaselined: false, commits: 0, celebrateNext: false, commitFlashAt: -1e9, commitProj: '', hpL: null, hpR: null };
+const BR = 0.12;
+const R_CONTACT = s => [s * 0.30, 0.90, 0.30], HIP_BALL = [-0.31, 0.84, 0.06];   // 待机：球夹在右髋侧，手臂自然垂下
+const SHOT = { T_G: 0.35, T_SET: 0.62, T_OFF: 0.55, T_REL: 0.87, T_LAND: 1.19, BP: [-0.12, 1.34, 0.18], BS: [-0.17, 2.00, 0.12], BREL: [-0.15, 2.34, 0.20],   // 收球贴腰腹、举到投篮肩上方贴额、出手向前上
+               FOLLOW_R: [-0.12, 2.12, 0.28], GUIDE_L: [0.10, 2.04, 0.20], WATCH_R: [-0.22, 0.80, 0.12], WATCH_L: [0.22, 0.79, 0.10] };   // 出手后手臂自然垂到身体两侧看球（曾误停在腰侧 → 叉腰）
+const jumpY = ts => { const u = ts - SHOT.T_OFF; return u <= 0 || u >= 0.64 ? 0 : 3.136 * u - 4.9 * u * u; };
+/* 投篮前的过人套路：每段 = 球从 a 经地面 f 弹到 b（root 坐标，x>0 = 左手侧），配身体横移 bodyX / 朝向虚晃 sway / 前后分腿 stance。
+   先左右晃人 ×2，再胯下 ×2（穿裆到体后再换回），球落回右手侧接干拔 */
+const COMBO = [
+  { dur: 0.55, a: [-0.30, 0.90, 0.30], f: [ 0.05, 0.12, 0.36], b: [ 0.44, 0.66, 0.30], bodyX:  0.30, sway: -0.55, squat: 0.42 },
+  { dur: 0.55, a: [ 0.44, 0.66, 0.30], f: [-0.05, 0.12, 0.36], b: [-0.44, 0.66, 0.30], bodyX: -0.30, sway:  0.55, squat: 0.45 },
+  { dur: 0.50, a: [-0.44, 0.66, 0.24], f: [ 0.02, 0.16, 0.34], b: [ 0.34, 0.74, 0.20], stance:  1, squat: 0.52 },
+  { dur: 0.50, a: [ 0.34, 0.74, 0.20], f: [-0.02, 0.16, 0.36], b: [-0.30, 0.80, 0.28], stance: -1, squat: 0.50 },
+];
+const rootToWorld = (arr, out) => ch.root.localToWorld(out.set(arr[0], arr[1], arr[2]));
+const rootDir = (x, y, z, out) => out.set(x, y, z).applyQuaternion(ch.root.quaternion).normalize();
+const rootOff = (x, y, z, out) => out.set(x, y, z).applyQuaternion(ch.root.quaternion);
+const yawToHoop = () => Math.atan2(G.hoop.x, G.hoop.z);
+
+function newHoop(first) {
+  const ang = rnd(-Math.PI, Math.PI), D = rnd(7.0, 8.4);                       // 篮筐悬在三分距离外的空中，方位随机、高度略随机
+  G.hoop.set(Math.sin(ang) * D, 3.05 + rnd(-0.15, 0.3), Math.cos(ang) * D);
+  world.hoop.position.copy(G.hoop); world.hoop.lookAt(0, G.hoop.y, 0);
+  const pref = P().camera;
+  const off = pref === 'side' ? (Math.random() < 0.5 ? -1 : 1) * rnd(1.15, 1.5) : pref === 'behind' ? rnd(-0.45, 0.45) : (Math.random() < 0.5 ? -1 : 1) * rnd(0.4, 1.45);
+  G.cam.ang = ang + off; G.cam.D = 11.8 - 3.2 * Math.abs(Math.sin(off)); G.cam.h = rnd(2.2, 3.6); G.cam.drift = Math.random() < 0.5 ? -1 : 1;
+  G.yaw = G.yawT = ang;
+  if (first) { camTarget(); camera.position.copy(G.cam.pos); }
+}
+function camTarget() {
+  const mx = G.hoop.x * 0.5, mz = G.hoop.z * 0.5;
+  G.cam.pos.set(mx + Math.sin(G.cam.ang) * G.cam.D, G.cam.h, mz + Math.cos(G.cam.ang) * G.cam.D); G.cam.look.set(mx, 2.4, mz);
+}
+function startShot(tag) {
+  const b0 = ch.root.worldToLocal(_v[0].copy(G.ballPos));
+  G.shot = { ts: 0, b0: [b0.x, b0.y, b0.z], released: false, tag: tag || '' };
+  G.shot.celebrate = G.celebrateNext; G.celebrateNext = false;
+  G.mode = 'shot'; G.shots++; G.lastShotAt = performance.now() / 1000; G.yawT = yawToHoop();
+}
+function onSwish() {
+  G.swishAt = performance.now() / 1000;                       // 音效预留
+  if (G.shot && G.shot.celebrate) { G.burstAt = G.swishAt; G.commitFlashAt = G.swishAt; }   // commit 庆祝：进球瞬间全场闪 + 记分牌 SCORE 闪
+}
+
+function update(dt, nowS, st, working, waitingAny) {
+  const d = G.drib, running = st.phase === 'running';
+  if (G.mode === 'hold' && G.queue > 0) { G.queue--; G.mode = 'combo'; G.comboT = 0; }
+  switch (G.mode) {
+    case 'hold':
+      if (working) { G.mode = 'dribble'; d.phi = 0; d.side = d.next = -1; d.count = 0; }
+      G.yawT = waitingAny ? Math.atan2(camera.position.x, camera.position.z) : yawToHoop();
+      break;
+    case 'dribble': {
+      d.phi += dt / (running ? 0.42 : 0.62);
+      if (d.phi >= 1) {
+        d.phi -= 1; d.side = d.next; d.count++; d.next = (running || d.count % 2 === 1) ? -d.side : d.side;
+        if (G.queue > 0) { G.queue--; G.mode = 'combo'; G.comboT = 0; break; }
+        if (!working) { G.mode = 'hold'; break; }
+      }
+      G.sway += dt; G.yawT = yawToHoop() + Math.sin(G.sway * 0.55) * (running ? 0.5 : 0.3);
+      break; }
+    case 'combo': {                                                          // 晃人 → 胯下 → 起跳
+      G.comboT += dt;
+      let acc = 0; G.comboSeg = null;
+      for (const sg of COMBO) { if (G.comboT < acc + sg.dur) { G.comboSeg = sg; G.comboTau = (G.comboT - acc) / sg.dur; break; } acc += sg.dur; }
+      if (!G.comboSeg) { G.ballPos.copy(rootToWorld(COMBO[COMBO.length - 1].b, _v[0])); startShot(G.pendingTag); break; }
+      G.yawT = yawToHoop() + (G.comboSeg.sway || 0) * Math.sin(G.comboTau * Math.PI);
+      break; }
+    case 'shot': {
+      const sh = G.shot; sh.ts += dt;
+      if (!sh.released && sh.ts >= SHOT.T_REL) {
+        sh.released = true;
+        const rel = rootToWorld([SHOT.BREL[0], SHOT.BREL[1] + jumpY(SHOT.T_REL), SHOT.BREL[2]], _v[0]); G.ballPos.copy(rel);
+        const tgt = _v[1].set(G.hoop.x + rnd(-0.04, 0.04), G.hoop.y, G.hoop.z + rnd(-0.04, 0.04)), dx = tgt.x - rel.x, dz = tgt.z - rel.z;
+        // 按目标弧顶反解：弧顶落在出手点/篮筐较高者之上 ~1.95m —— 真实三分的彩虹弧，入射约 45°，落点在篮筐中心必进
+        const g = 9.8, apexY = Math.max(rel.y, tgt.y) + 1.95;
+        const vy0 = Math.sqrt(2 * g * (apexY - rel.y));           // 出手竖直初速（升到弧顶）
+        const Tf = vy0 / g + Math.sqrt(2 * (apexY - tgt.y) / g);  // 升到顶 + 从顶落到篮筐
+        G.ballVel.set(dx / Tf, vy0, dz / Tf); G.ballMode = 'flight'; G.tag = sh.tag;
+      }
+      if (G.ballMode === 'gone' || sh.ts > 9) { G.mode = 'cut'; G.fadeDir = 1; }
+      break; }
+    case 'cut':
+      G.fade = clamp(G.fade + G.fadeDir * dt * 3.2, 0, 1);
+      if (G.fadeDir > 0 && G.fade >= 1) {
+        newHoop(false); camTarget(); camera.position.copy(G.cam.pos);
+        ch.root.rotation.y = G.yaw; ch.root.updateMatrixWorld(true);
+        G.ballMode = 'hand'; G.ballFade = 1; G.ballPos.copy(rootToWorld(HIP_BALL, _v[0])); G.tag = ''; G.fadeDir = -1;
+      } else if (G.fadeDir < 0 && G.fade <= 0) { G.mode = 'hold'; G.fadeDir = 0; }
+      break;
+  }
+  const hp = G.hoop;
+  if (G.ballMode === 'flight') {
+    const prevY = G.ballPos.y; G.ballVel.y -= 9.8 * dt; G.ballPos.addScaledVector(G.ballVel, dt);
+    if (G.ballVel.y < 0 && prevY > hp.y && G.ballPos.y <= hp.y) { G.ballMode = 'net'; G.ballVel.x *= 0.15; G.ballVel.z *= 0.15; G.ballVel.y *= 0.35; world.net.hit[0] = nowS; onSwish(); }
+  } else if (G.ballMode === 'net') {
+    G.ballVel.y -= 9.8 * 0.3 * dt; G.ballPos.addScaledVector(G.ballVel, dt); G.ballPos.x += (hp.x - G.ballPos.x) * 0.1; G.ballPos.z += (hp.z - G.ballPos.z) * 0.1;
+    world.net.rings.forEach((rg, k) => { if (k && world.net.hit[k] < nowS - 5 && G.ballPos.y <= hp.y + rg.y) world.net.hit[k] = nowS; });
+    if (G.ballPos.y < hp.y - 0.55) { G.ballMode = 'drop'; const away = _v[0].set(-hp.x, 0, -hp.z).normalize(); G.ballVel.set(away.x * rnd(0.8, 1.6) + rnd(-0.4, 0.4), Math.min(G.ballVel.y, -0.5), away.z * rnd(0.8, 1.6) + rnd(-0.4, 0.4)); G.dropT = 0; G.restT = 0; }
+  } else if (G.ballMode === 'drop') {                                        // 真实球场回弹：恢复系数 0.84（篮球规则：1.8m 落下回弹 1.2~1.4m，高度比 ~0.71），弹多次逐渐变矮，落定后滚动
+    G.dropT += dt; G.ballVel.y -= 9.8 * dt; G.ballPos.addScaledVector(G.ballVel, dt);
+    if (G.ballPos.y < BR) {
+      G.ballPos.y = BR;
+      if (Math.abs(G.ballVel.y) < 0.35) G.ballVel.y = 0;                     // 弹不动了才贴地转纯滚动（阈值低，前几弹清脆）
+      else { G.ballVel.y = -G.ballVel.y * 0.84; G.ballVel.x *= 0.97; G.ballVel.z *= 0.97; }   // 触地竖直反弹，水平几乎不掉速
+    }
+    const onFloor = G.ballPos.y <= BR + 1e-3 && G.ballVel.y === 0, sp = Math.hypot(G.ballVel.x, G.ballVel.z);
+    if (onFloor) { const f = Math.max(0, 1 - 1.2 * dt); G.ballVel.x *= f; G.ballVel.z *= f; }   // 地面滚动摩擦
+    G.restT = onFloor && sp < 0.1 ? G.restT + dt : 0;
+    if (G.restT > 0.5 || G.dropT > 7.5) G.ballMode = 'gone';
+  } else if (G.ballMode === 'gone') G.ballFade = Math.max(0, G.ballFade - dt * 3);
+}
+
+function driveGrip(node, handTarget) {
+  if (!handTarget) { node.visible = false; return; }
+  const dir = _v[3].copy(handTarget).sub(G.ballPos);                          // 手相对球的方向 = 掌背朝向；退化时朝上
+  if (dir.lengthSq() < 1e-4) dir.set(0, 1, 0); else dir.normalize();
+  node.position.copy(G.ballPos); node.quaternion.setFromUnitVectors(UP, dir); node.visible = true;
+}
+/* ── 姿态：算出根朝向、躯干、下蹲、双手目标、视线，交给数字人 ─────── */
+const T_ = THREE && { ball: V3(), hL: V3(), hR: V3(), oL: V3(), oR: V3(), look: V3(), tmp: V3() };
+function pose(dt, nowS, st, waitingAny) {
+  const d = G.drib, running = st.phase === 'running', root = ch.root;
+  let dy = G.yawT - G.yaw; dy = Math.atan2(Math.sin(dy), Math.cos(dy)); G.yaw += dy * Math.min(1, dt * (G.mode === 'shot' ? 7 : 4));
+  const swx = G.mode === 'dribble' ? Math.sin(G.sway * 0.7) * 0.12 : 0, swz = G.mode === 'dribble' ? Math.sin(G.sway * 0.43) * 0.08 : 0;
+  G.bodyX += (((G.mode === 'combo' && G.comboSeg && G.comboSeg.bodyX) || 0) - G.bodyX) * Math.min(1, dt * 9);   // 晃人的横向扑步
+  root.rotation.y = G.yaw;
+  root.position.set(swx + Math.cos(G.yaw) * G.bodyX, 0, swz - Math.sin(G.yaw) * G.bodyX); root.updateMatrixWorld(true);
+  let squat = 0.12, lean = 0.06, twist = 0, side = 0, air = false, jump = 0, stance = 0, gripL = false, gripR = false;
+  if (G.mode !== 'dribble') G.hpL = null;
+  T_.look.copy(G.hoop);
+  if (G.mode === 'hold' || G.mode === 'cut') {
+    rootToWorld(HIP_BALL, T_.ball); T_.ball.y += Math.sin(nowS * 1.6) * 0.008;                     // 双臂自然下垂：右手从外上方扣住髋侧的球，左手垂在腿侧随呼吸微动
+    T_.hR.copy(T_.ball).add(rootOff(-0.07, 0.11, 0.01, T_.tmp)); rootToWorld([0.31, 0.77 + Math.sin(nowS * 1.6) * 0.006, 0.03], T_.hL);
+    rootDir(-1, 0, -0.45, T_.oR); rootDir(1, 0, -0.5, T_.oL);
+    squat = 0.1 + 0.01 * Math.sin(nowS * 1.6); gripR = true;
+    if (waitingAny) T_.look.copy(camera.position);
+  } else if (G.mode === 'dribble') {
+    const s = d.side, s2 = d.next, phi = d.phi, C1 = R_CONTACT(s), C2 = R_CONTACT(s2), F = [(C1[0] + C2[0]) / 2 + (s === s2 ? s * 0.02 : 0), BR, C1[2] + 0.1];
+    let bl;
+    if (phi < 0.5) { const u = phi / 0.5; bl = [C1[0] + (F[0] - C1[0]) * u, C1[1] - (C1[1] - BR) * u * u, C1[2] + (F[2] - C1[2]) * u]; }
+    else { const u = (phi - 0.5) / 0.5; bl = [F[0] + (C2[0] - F[0]) * u, BR + (C2[1] - BR) * (1 - (1 - u) * (1 - u)), F[2] + (C2[2] - F[2]) * u]; }
+    rootToWorld(bl, T_.ball);
+    // 运球手 = 当前 side（一整拍不换手，换手只在拍与拍之间）；手只跟球的上半程，高度夹底 0.58，绝不伸到地面
+    const active = s;
+    const act = active === 1 ? T_.hL : T_.hR, other = active === 1 ? T_.hR : T_.hL, actOut = active === 1 ? T_.oL : T_.oR, otherOut = active === 1 ? T_.oR : T_.oL;
+    const handY = Math.max(0.58, bl[1] + BR + 0.06);            // 球高 = 压/接在球上；球低到地面时手停在 0.58 等球弹回
+    rootToWorld([bl[0] * 0.82 + active * 0.05, handY, bl[2] - 0.03], act);           // 运球手在球正上方、略偏体侧
+    rootToWorld([-active * 0.24, 1.0 + 0.015 * Math.sin(nowS * 3), 0.16], other);    // 护球手：胸腹前偏另一侧，随呼吸微动
+    rootDir(active * 0.4, -0.9, -0.2, actOut);                  // 运球肘朝下（前臂竖直推球，不外张）
+    rootDir(-active * 0.7, -0.2, 0.4, otherOut);                // 护球肘朝外前
+    twist = -active * (running ? 0.14 : 0.08); side = active * 0.05; lean = 0.42; squat = 0.34 + 0.05 * Math.sin(phi * TAU);
+    if (active === 1) gripL = true; else gripR = true;
+    // 世界坐标平滑：换手瞬间的目标跳变由 lerp 吸收，手臂不再左右抽跳
+    if (!G.hpL) { G.hpL = T_.hL.clone(); G.hpR = T_.hR.clone(); }
+    else { G.hpL.lerp(T_.hL, Math.min(1, dt * 15)); G.hpR.lerp(T_.hR, Math.min(1, dt * 15)); }
+    T_.hL.copy(G.hpL); T_.hR.copy(G.hpR);
+  } else if (G.mode === 'combo') {
+    const seg = G.comboSeg || COMBO[0], tau = G.comboTau || 0;
+    let bl;
+    if (tau < 0.5) { const u = tau / 0.5; bl = [seg.a[0] + (seg.f[0] - seg.a[0]) * u, seg.a[1] - (seg.a[1] - seg.f[1]) * u * u, seg.a[2] + (seg.f[2] - seg.a[2]) * u]; }
+    else { const u = (tau - 0.5) / 0.5; bl = [seg.f[0] + (seg.b[0] - seg.f[0]) * u, seg.f[1] + (seg.b[1] - seg.f[1]) * (1 - (1 - u) * (1 - u)), seg.f[2] + (seg.b[2] - seg.f[2]) * u]; }
+    rootToWorld(bl, T_.ball);
+    const topY = bl[1] + BR + 0.03, relSide = seg.a[0] >= 0 ? 1 : -1, recvSide = seg.b[0] >= 0 ? 1 : -1;
+    const active = tau < 0.5 && topY >= 0.6 ? relSide : recvSide;
+    const act = active === 1 ? T_.hL : T_.hR, other = active === 1 ? T_.hR : T_.hL, actOut = active === 1 ? T_.oL : T_.oR, otherOut = active === 1 ? T_.oR : T_.oL;
+    if (topY >= 0.6) act.copy(T_.ball).add(rootOff(0, BR + 0.03, 0, T_.tmp));
+    else rootToWorld([seg.b[0], Math.max(seg.b[1] + BR + 0.03, 0.6), seg.b[2]], act);
+    rootToWorld([-active * 0.46, 1.06, 0.28], other);                          // 另一只手前伸护球
+    rootDir(active * 0.8, -0.1, -0.6, actOut); rootDir(-active * 0.9, -0.15, 0.5, otherOut);
+    twist = -active * 0.32 + (seg.sway || 0) * 0.3; side = active * 0.12 + (seg.sway || 0) * 0.15;
+    lean = 0.4; squat = seg.squat || 0.45; stance = seg.stance || 0;
+    if (active === 1) gripL = true; else gripR = true;
+  } else if (G.mode === 'shot') {
+    const sh = G.shot, ts = sh.ts; jump = jumpY(ts);
+    let bl;
+    if (ts < SHOT.T_G) { const u = ease(ts / SHOT.T_G); bl = sh.b0.map((v, i) => v + (SHOT.BP[i] - v) * u); squat = 0.26 + 0.16 * u; lean = 0.12 * (1 - u); }
+    else if (ts < SHOT.T_SET) { const u = ease((ts - SHOT.T_G) / (SHOT.T_SET - SHOT.T_G)); bl = SHOT.BP.map((v, i) => v + (SHOT.BS[i] - v) * u); squat = 0.42 * (1 - ease((ts - SHOT.T_G) / (SHOT.T_OFF - SHOT.T_G))); }
+    else if (ts < SHOT.T_REL) { const u = easeOut((ts - SHOT.T_SET) / (SHOT.T_REL - SHOT.T_SET)); bl = SHOT.BS.map((v, i) => v + (SHOT.BREL[i] - v) * u); squat = 0; }
+    else bl = null;
+    air = ts >= SHOT.T_OFF && ts < SHOT.T_LAND;
+    if (ts >= SHOT.T_LAND) { const u = ts - SHOT.T_LAND; squat = u < 0.35 ? 0.45 * ease(u / 0.35) : 0.45 - 0.3 * ease((u - 0.35) / 0.8); }
+    if (bl) {
+      bl = [bl[0], bl[1] + jump, bl[2]]; rootToWorld(bl, T_.ball);
+      T_.hR.copy(T_.ball).add(rootOff(-0.02, -0.14, -0.05, T_.tmp));
+      const gu = ease((ts - SHOT.T_SET) / (SHOT.T_REL - SHOT.T_SET));
+      rootToWorld([SHOT.GUIDE_L[0], SHOT.GUIDE_L[1] + jump, SHOT.GUIDE_L[2]], T_.tmp);
+      T_.hL.copy(T_.ball).add(rootOff(0.13, 0, -0.02, _v[0])).lerp(T_.tmp, gu);
+      if (ts < 0.12) { rootToWorld([0.3, 1.0, 0.15], T_.tmp); T_.hL.lerp(T_.tmp, 1 - ts / 0.12); }
+      rootDir(-0.25, -1, 0.05, T_.oR); rootDir(0.85, -0.15, 0.35, T_.oL); gripL = gripR = true;   // 投篮肘朝下立肘、引导手肘朝外扶球
+    } else {
+      const u = ease((ts - SHOT.T_REL) / 0.15), w = ease((ts - SHOT.T_LAND) / 0.45);
+      rootToWorld([SHOT.BREL[0] - 0.02, SHOT.BREL[1] - 0.14 + jump, SHOT.BREL[2] - 0.05], T_.hR); rootToWorld([SHOT.FOLLOW_R[0], SHOT.FOLLOW_R[1] + jump, SHOT.FOLLOW_R[2]], T_.tmp); T_.hR.lerp(T_.tmp, u);
+      rootToWorld([SHOT.WATCH_R[0], SHOT.WATCH_R[1], SHOT.WATCH_R[2]], T_.tmp); T_.hR.lerp(T_.tmp, w);
+      rootToWorld([SHOT.GUIDE_L[0], SHOT.GUIDE_L[1] + jump, SHOT.GUIDE_L[2]], T_.hL); rootToWorld([SHOT.WATCH_L[0], SHOT.WATCH_L[1], SHOT.WATCH_L[2]], T_.tmp); T_.hL.lerp(T_.tmp, w);
+      rootDir(-1, -0.1, -0.4 - 0.9 * w, T_.oR); rootDir(1, -0.1, -0.4 - 0.9 * w, T_.oL);   // 跟随时肘朝前，落地后转为自然下垂
+      T_.look.copy(G.ballPos);
+    }
+    if (ts >= SHOT.T_G) { const rel = ease(clamp((ts - SHOT.T_G) / (SHOT.T_REL - SHOT.T_G), 0, 1)), land = ease(clamp((ts - SHOT.T_LAND) / 0.55, 0, 1)); lean = -0.24 * rel * (1 - land); }   // 干拔后仰
+  }
+  ch.setPose({ squat, jump, lean, twist, side, air, stance, h: { L: T_.hL, R: T_.hR }, o: { L: T_.oL, R: T_.oR }, look: T_.look });
+  // 抓球手：只在真持球时显示，放在球心、掌背朝手，指尖弯过球面（对内置角色 / 外部模型一致）
+  const inHand = G.ballMode === 'hand';
+  driveGrip(world.grip.R, inHand && gripR ? T_.hR : null);
+  driveGrip(world.grip.L, inHand && gripL ? T_.hL : null);
+  // 球：在手上时平滑跟目标；飞行后走物理
+  const ball = world.ball;
+  if (G.ballMode === 'hand') {
+    const prev = _v[0].copy(G.ballPos); G.ballPos.lerp(T_.ball, Math.min(1, dt * 22));
+    const mv = _v[1].copy(G.ballPos).sub(prev); if (mv.lengthSq() > 1e-8) { const axis = _v[2].crossVectors(UP, mv).normalize(); if (axis.lengthSq() > 0.5) ball.rotateOnWorldAxis(axis, mv.length() / BR * 0.6); }
+  } else if (G.ballMode === 'flight' || G.ballMode === 'net') { const axis = _v[2].set(G.ballVel.x, 0, G.ballVel.z); if (axis.lengthSq() > 1e-6) { axis.normalize().cross(UP); ball.rotateOnWorldAxis(axis, dt * 16); } }
+  else if (G.ballMode === 'drop') { const axis = _v[2].crossVectors(UP, G.ballVel); if (axis.lengthSq() > 1e-6) ball.rotateOnWorldAxis(axis.normalize(), Math.hypot(G.ballVel.x, G.ballVel.z) / BR * dt); }
+  ball.position.copy(G.ballPos); ball.visible = G.ballFade > 0.01; ball.material.opacity = G.ballFade; ball.material.transparent = G.ballFade < 1;
+  const bh = Math.max(0, G.ballPos.y - BR), bs = 0.3 + bh * 0.12;
+  world.ballShadow.position.set(G.ballPos.x, 0.003, G.ballPos.z); world.ballShadow.scale.set(bs, bs, 1); world.ballShadow.material.opacity = G.ballFade * 0.5 / (1 + bh * 0.9); world.ballShadow.visible = ball.visible;
+  world.playerShadow.position.set(root.position.x, 0.004, root.position.z); world.playerShadow.scale.set(1.1 + jump * 0.5, 0.75 + jump * 0.3, 1); world.playerShadow.material.opacity = 0.55 / (1 + jump * 2);
+}
+
+/* ── 2D 层 ─────── */
+function roundRect(c, x, y, w, h, r) { c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath(); }
+function text(c, str, x, y, size, color, alpha, align, weight) { c.font = `${weight || 400} ${size * S}px ${MONO}`; c.textAlign = align || 'left'; c.textBaseline = 'alphabetic'; c.fillStyle = rgba(color, alpha); c.fillText(str, x, y); }
+function drawScoreboard(st, pw, col, wait, count, nowS, dim) {
+  const c = uctx, w = Math.min(470 * S, W * 0.6), h = 100 * S, x = (W - w) / 2, y = bounds.top + 24 * S, hi = lift(col);
+  c.strokeStyle = 'rgba(120,130,145,0.5)'; c.lineWidth = 1.5; c.beginPath(); c.moveTo(x + 40 * S, 0); c.lineTo(x + 40 * S, y); c.moveTo(x + w - 40 * S, 0); c.lineTo(x + w - 40 * S, y); c.stroke();
+  roundRect(c, x, y, w, h, 8 * S); c.fillStyle = 'rgba(9,11,16,0.92)'; c.fill(); c.strokeStyle = rgba(col, 0.55 * dim); c.lineWidth = 1.5; c.stroke();
+  const divX = x + w - 150 * S; c.strokeStyle = rgba(col, 0.25); c.lineWidth = 1; c.beginPath(); c.moveTo(divX, y + 12 * S); c.lineTo(divX, y + h - 12 * S); c.stroke();
+  c.save(); c.shadowColor = rgba(hi, 0.8); c.shadowBlur = 10 * S;
+  const cflash = nowS - G.commitFlashAt < 2.4, blink = t => Math.floor((nowS - t) * 4) % 2 === 0;
+  const burst = G.burstAt != null && nowS - G.burstAt < 1.6;
+  const tag = cflash && blink(G.commitFlashAt) ? 'SCORE +1' : burst && blink(G.burstAt) ? 'FULL ENERGY' : (PHASE_WORD[st.phase] || 'STANDBY');
+  text(c, tag, x + 18 * S, y + 36 * S, 21, cflash ? PAL.running : hi, 0.98 * dim, 'left', 700); c.restore();
+  // 会话数 + SCORE（= 本次运行真实 commit 数，唯一诚实的"得分"）；commit 时闪亮并标出仓库
+  let line2 = count ? `${count} ON COURT` : 'COURT EMPTY';
+  if (G.commits > 0) line2 += `   SCORE ${G.commits}`;
+  text(c, line2, x + 18 * S, y + 54 * S, 11, hi, (cflash ? 0.6 + 0.4 * (blink(G.commitFlashAt) ? 1 : 0) : 0.65) * dim);
+  if (cflash) { c.save(); c.shadowColor = rgba(PAL.running, 0.8); c.shadowBlur = 8 * S; text(c, '✓ ' + G.commitProj + ' COMMITTED', x + 18 * S, y + h - 8 * S, 9.5, PAL.running, 0.85 * dim, 'left', 600); c.restore(); }
+  if (pw) {
+    const cells = 10, cw = 13 * S, cy = y + 70 * S, filled = Math.round(pw.remain / 10), lc = pw.remain < 20 ? PAL.waiting : hi;
+    for (let i = 0; i < cells; i++) { c.fillStyle = i < filled ? rgba(lc, 0.9 * dim) : rgba(col, 0.15); c.fillRect(x + 18 * S + i * (cw + 3 * S), cy, cw, 7 * S); }
+    let s = `${Math.round(pw.remain)}%`; if (pw.stale) s += `   AS OF ${__ldWidgets.clock(pw.recordedAt)}`;   // RESET 倒计时已移到右侧 GAME CLOCK 大数字
+    text(c, s, x + 18 * S + cells * (cw + 3 * S) + 8 * S, cy + 7 * S, 11, hi, 0.7 * dim);
+  }
+  // 主时钟（GAME CLOCK）= 五小时额度重置倒计时；额度 < 20% 转琥珀告警；窗口已过 = FULL（满血）
+  const on = !!wait, low = pw && !pw.recharged && pw.remain < 20;
+  const gc = pw ? (pw.recharged ? 'FULL' : pw.resetsAt > 0 ? __ldWidgets.hms(pw.resetsAt - pw.now) : '--:--:--') : '--:--:--';
+  c.save(); if (low) { c.shadowColor = rgba(PAL.waiting, 0.9); c.shadowBlur = 14 * S; }
+  text(c, gc, x + w - 18 * S, y + 46 * S, 26, low ? PAL.waiting : hi, 0.92 * dim, 'right', 700); c.restore();
+  text(c, 'GAME CLOCK', x + w - 18 * S, y + 66 * S, 10, hi, 0.6 * dim, 'right', 600);
+  // 「等你输入」降为提示行，保留桌面层最关键的感知：有会话在等你才显示（琥珀呼吸），标出是谁 + 等了多久
+  if (on) text(c, '◗ ' + wait.label.slice(0, 10) + '  ' + clockStr(wait.seconds), x + w - 18 * S, y + 82 * S, 10, PAL.waiting, (0.7 + 0.3 * Math.sin(nowS * 3.2)) * dim, 'right');
+  // 数字人来源（真话）：正在驱动哪个模型 / 为什么回落
+  const who = loading ? 'PLAYER · LOADING…' : ch && ch.kind === 'model' ? `PLAYER · ${loadedName.toUpperCase()} · ${(ch.tris / 1000).toFixed(0)}K TRIS${autoPicked && modelErr ? ' · 自动选用（设置页选的 ' + modelErr + '）' : ''}` : `PLAYER · BUILT-IN · ${modelErr || ''}`;
+  const bad = !loading && !(ch && ch.kind === 'model');
+  text(c, who, W / 2, y + h + 16 * S, 9.5, bad ? PAL.waiting : col, (bad ? 0.85 : 0.5) * dim, 'center');
+}
+
+/* ── 主循环 ─────── */
+const col = PAL.idle.slice(), key = KEY.idle.slice();
+let lastNow = performance.now(), booted = false;
+if (renderer && __ld3d && __ld3d.available) { buildWorld(); useChar(makeBuiltinChar()); newHoop(true); G.ballPos.copy(rootToWorld(HIP_BALL, _v[0])); booted = true; }
+else if (!glErr) glErr = (__ld3d && __ld3d.reason) || 'ld-3d.js 不可用';
+__ld.loop((t, th, st) => {
+  const now = performance.now(), nowS = now / 1000, gap = (now - lastNow) / 1000, dt = Math.min(0.05, gap); lastNow = now;
+  if (gap > 1 && P().autoShoot) G.lastShotAt = Math.min(G.lastShotAt, nowS - 8.5);   // 桌面刚露出：1.5s 内先投一个
+  const ins = st.host && st.host.insets; if (ins) bounds = { top: ins.top || 0, bottom: ins.bottom || 0, left: ins.left || 0, right: ins.right || 0 };
+  const tc = PAL[st.phase] || PAL.idle, tk = KEY[st.phase] || KEY.idle; for (let i = 0; i < 3; i++) { col[i] += (tc[i] - col[i]) * 0.05; key[i] += (tk[i] - key[i]) * 0.05; }
+  const pw = __ldWidgets.computePower(st.quota), ev = __ld.events(st, pw), sessions = st.sessions || [];
+  let wait = null; for (const s of sessions) if (s.phase === 'waiting' && !s.stalled && !s.parked && (!wait || (s.idleSeconds || 0) > wait.seconds)) wait = { label: sessLabel(s).toUpperCase(), seconds: s.idleSeconds || 0 };
+  const working = st.phase === 'running' || st.phase === 'thinking';
+  const dim = ev.lowPower && pw && __ld.flicker(t, pw.remain) ? 0.45 : 1;
+  // 普通跳投 = 一个回合完成：某会话从思考/执行转入「等你输入」（Claude 把球交回给你）
+  const cur = {};
+  for (const ss of sessions) { const key = `${ss.name || ''}|${ss.project || ''}|${ss.kind || ''}`; cur[key] = ss.phase;
+    const was = G.prevPhase[key];
+    if ((was === 'running' || was === 'thinking') && ss.phase === 'waiting' && !ss.stalled && !ss.parked) { G.queue = Math.min(2, G.queue + 1); G.pendingTag = sessLabel(ss).toUpperCase().slice(0, 16); }
+  }
+  G.prevPhase = cur;
+  // 特殊庆祝 = git commit：任一仓库 committedAt 前进 = 一次真实落库（首帧只记基线不庆祝）
+  let maxCommit = 0, commitRepo = '';
+  for (const r of (st.repos || [])) if ((r.committedAt || 0) > maxCommit) { maxCommit = r.committedAt; commitRepo = r.project || ''; }
+  if (!G.commitBaselined) { G.seenCommitAt = maxCommit; G.commitBaselined = true; }   // 首帧记基线（含 0），避免庆祝加载前的旧 commit
+  else if (maxCommit > G.seenCommitAt) { G.seenCommitAt = maxCommit; G.commits++; G.commitProj = commitRepo.toUpperCase().slice(0, 14);
+    G.celebrateNext = true; G.queue = Math.min(2, G.queue + 1); G.pendingTag = (commitRepo.toUpperCase().slice(0, 12) + ' ✓'); }   // 新 commit 触发一次庆祝投篮
+  if (P().autoShoot && G.mode !== 'shot' && G.mode !== 'cut' && nowS - G.lastShotAt > 10 && !G.queue) { G.queue = 1; G.pendingTag = ''; }
+  if (ev.recharge) G.burstAt = nowS;
+
+  bctx.fillStyle = '#03060a'; bctx.fillRect(0, 0, W, H);
+  const gr = bctx.createRadialGradient(W / 2, H * 0.6, 0, W / 2, H * 0.6, Math.max(W, H) * 0.6); gr.addColorStop(0, rgba(key, 0.35 * dim)); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  bctx.fillStyle = gr; bctx.fillRect(0, 0, W, H);
+  uctx.clearRect(0, 0, W, H);
+
+  if (booted) {
+    ensureModel((__ld.config && __ld.config.model) || 'station');
+    update(dt, nowS, st, working, !!wait);
+    pose(dt, nowS, st, !!wait);
+    updateNet(nowS);
+    if (G.mode === 'hold' || G.mode === 'dribble') { G.cam.ang += dt * 0.035 * G.cam.drift; G.cam.h += Math.sin(nowS * 0.3) * dt * 0.05; }
+    camTarget(); camera.position.lerp(G.cam.pos, Math.min(1, dt * 2.5)); camera.lookAt(G.cam.look);
+    // 全息配色 / 扫描面（工具调用 = 扫描面自下而上掠过球员）/ 光池 / 尘埃
+    keyColor.setRGB(col[0] / 255, col[1] / 255, col[2] / 255); hiColor.setRGB(lift(col)[0] / 255, lift(col)[1] / 255, lift(col)[2] / 255);
+    shared.uTime.value = t; shared.uAlpha.value = dim;
+    const sinceSwish = nowS - G.swishAt; shared.uScanY.value = sinceSwish < 0.8 ? -0.2 + sinceSwish / 0.8 * 2.4 : -99;
+    world.pool.material.color.setRGB(col[0] / 255, col[1] / 255, col[2] / 255); world.pool.material.opacity = (wait ? 0.55 + 0.25 * Math.sin(nowS * 3) : 0.45) * dim;
+    world.dust.visible = P().particles !== false; world.dust.rotation.y = nowS * 0.01; world.dust.material.color.setRGB(col[0] / 255, col[1] / 255, col[2] / 255); world.dust.material.opacity = 0.35 * dim;
+    renderer.render(scene, camera);
+    if (G.tag && P().toolTag !== false && (G.ballMode === 'flight' || G.ballMode === 'net')) {
+      const p = _v[0].copy(G.ballPos).project(camera);
+      if (p.z < 1) { uctx.save(); uctx.shadowColor = 'rgba(0,0,0,0.9)'; uctx.shadowBlur = 5 * S; text(uctx, G.tag, (p.x + 1) / 2 * W, (1 - p.y) / 2 * H - 22 * S, 11, lift(col), 0.95, 'center', 600); uctx.restore(); }
+    }
+    if (G.fade > 0) { uctx.fillStyle = `rgba(3,4,8,${G.fade})`; uctx.fillRect(0, 0, W, H); }
+  } else text(uctx, 'WEBGL UNAVAILABLE' + (glErr ? ' · ' + glErr : ''), W / 2, H / 2, 14, lift(col), 0.85, 'center', 600);
+  if (P().scoreboard !== false) drawScoreboard(st, pw, col, wait, sessions.length, nowS, dim);
+  __ldWidgets.draw(st, { key: col.map(v => v * 0.6), hi: col }, { heroShowsPower: P().scoreboard !== false });
+});
+
+// 手动触发一次庆祝（预览用，不动 git；./ld celebrate 调它）——效果同真实 commit
+window.__ldCelebrate = () => { G.commits++; G.commitProj = 'DEMO'; G.celebrateNext = true; G.queue = Math.min(2, G.queue + 1); G.pendingTag = 'DEMO ✓'; };
+window.__ldSkinDiag = () => ({
+  webgl: !!renderer, error: glErr, model: modelName, player: ch ? ch.kind : null, playerLabel: loadedName, modelErr, loading, tris: ch ? ch.tris : 0,
+  mode: G.mode, ballMode: G.ballMode, shots: G.shots, queue: G.queue, commits: G.commits, celebrate: !!(G.shot && G.shot.celebrate), shotTs: G.shot ? +G.shot.ts.toFixed(2) : null, comboT: +G.comboT.toFixed(2), seg: G.comboSeg ? COMBO.indexOf(G.comboSeg) : -1, tau: +G.comboTau.toFixed(2), dropT: +G.dropT.toFixed(2),
+  hoop: G.hoop ? [+G.hoop.x.toFixed(2), +G.hoop.y.toFixed(2), +G.hoop.z.toFixed(2)] : null, ball: G.ballPos ? [+G.ballPos.x.toFixed(2), +G.ballPos.y.toFixed(2), +G.ballPos.z.toFixed(2)] : null,
+  cam: camera ? [+camera.position.x.toFixed(1), +camera.position.y.toFixed(1), +camera.position.z.toFixed(1)] : null, drawCalls: renderer ? renderer.info.render.calls : null,
+});
+</script></body></html>

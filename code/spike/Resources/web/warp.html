@@ -1,0 +1,77 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>Warp</title><script src="ld.js"></script><script src="ld-widgets.js"></script></head>
+<body><canvas id="c"></canvas>
+<script>
+/* 星际跃迁 —— 迎面飞来的星场。
+   航速随状态：待机时星星缓慢漂过，执行工具时拉成长长的光轨；
+   状态切换 = 一次跃迁（闪白 + 短暂超速）；每次真实工具调用，舷窗中央炸开一簇火花。 */
+const cv = document.getElementById('c'), ctx = cv.getContext('2d', { alpha: false });
+const SKIN = {
+  idle:     { key: [0x1e,0x3e,0x7a], hi: [0x8c,0xb8,0xff], bg: [0x02,0x04,0x0c] },
+  thinking: { key: [0x5a,0x46,0xb0], hi: [0xb8,0xa0,0xff], bg: [0x05,0x03,0x0e] },
+  running:  { key: [0x14,0x6a,0x9a], hi: [0x50,0xe0,0xff], bg: [0x02,0x06,0x0e] },
+  waiting:  { key: [0x8a,0x50,0x14], hi: [0xff,0xb8,0x50], bg: [0x0c,0x06,0x02] },
+};
+let W = 0, H = 0, S = 1, stars = [];
+const skin = { key: [...SKIN.idle.key], hi: [...SKIN.idle.hi], bg: [...SKIN.idle.bg] };
+const rgba = (c, a) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+function spawn(s, far) { s.x = (Math.random() - 0.5) * 2.4; s.y = (Math.random() - 0.5) * 2.4; s.z = far ? 1 : 0.05 + Math.random() * 0.95; s.tint = Math.random(); return s; }
+function resize() {
+  W = cv.width = innerWidth; H = cv.height = innerHeight; S = Math.min(W, H) / 900;
+  stars = Array.from({ length: Math.max(240, Math.min(560, Math.round(W * H / 5200))) }, () => spawn({}, false));
+}
+addEventListener('resize', resize); resize();
+
+const fx = { sparks: [], jump: 0, flash: 0 };
+let lastNow = performance.now();
+__ld.loop((t, th, st) => {
+  const target = SKIN[st.phase] || SKIN.idle;
+  for (let i = 0; i < 3; i++) { skin.key[i] += (target.key[i] - skin.key[i]) * 0.05; skin.hi[i] += (target.hi[i] - skin.hi[i]) * 0.05; skin.bg[i] += (target.bg[i] - skin.bg[i]) * 0.05; }
+  const now = performance.now(), dt = Math.min(0.1, (now - lastNow) / 1000); lastNow = now;
+  const pw = __ldWidgets.computePower(st.quota);
+  const ev = __ld.events(st, pw);
+  if (ev.tool) for (let i = 0; i < 34; i++) { const a = Math.random() * Math.PI * 2, v = (120 + Math.random() * 260) * S; fx.sparks.push({ x: W / 2, y: H / 2, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 0.38 + Math.random() * 0.2, age: 0 }); }
+  if (ev.phase) { fx.jump = 1; fx.flash = Math.max(fx.flash, 0.5); }
+  if (ev.recharge) { fx.jump = 1.3; fx.flash = Math.max(fx.flash, 0.8); }
+  fx.jump = Math.max(0, fx.jump - dt * 0.9); fx.flash = Math.max(0, fx.flash - dt * 1.6);
+  const dim = ev.lowPower && __ld.flicker(t, pw.remain) ? 0.5 : 1;
+
+  const cx = W / 2, cy = H / 2, f = Math.min(W, H) * 0.9;
+  const v = (0.06 + th.speed * 0.5) * (1 + fx.jump * 2.2);          // 航速
+  const streak = (0.01 + th.speed * 0.05) * (1 + fx.jump * 2.5);   // 光轨长度（沿 z）
+  ctx.fillStyle = rgba(skin.bg, 1); ctx.fillRect(0, 0, W, H);
+  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.min(W, H) * 0.5);
+  g.addColorStop(0, rgba(skin.key, (0.35 + fx.jump * 0.3) * dim)); g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  ctx.lineCap = 'round';
+  for (const s of stars) {
+    s.z -= v * dt;
+    if (s.z <= 0.04) spawn(s, true);
+    const k = f / s.z, x = cx + s.x * k, y = cy + s.y * k;
+    if (x < -50 || x > W + 50 || y < -50 || y > H + 50) { spawn(s, true); continue; }
+    const zp = Math.min(1, s.z + streak), kp = f / zp, xp = cx + s.x * kp, yp = cy + s.y * kp;
+    const near = 1 - s.z, c = s.tint < 0.7 ? skin.hi : s.tint < 0.9 ? [255, 255, 255] : skin.key;
+    const a = Math.min(1, 0.15 + near * 1.1) * dim, w = 0.5 + near * 2.2 * S;
+    if (Math.hypot(x - xp, y - yp) < 1.2) { ctx.fillStyle = rgba(c, a); ctx.fillRect(x - w / 2, y - w / 2, w, w); }
+    else { ctx.strokeStyle = rgba(c, a); ctx.lineWidth = w; ctx.beginPath(); ctx.moveTo(xp, yp); ctx.lineTo(x, y); ctx.stroke(); }
+  }
+
+  // 火花（工具调用）
+  for (let i = fx.sparks.length - 1; i >= 0; i--) {
+    const p = fx.sparks[i]; p.age += dt; if (p.age >= p.life) { fx.sparks.splice(i, 1); continue; }
+    p.x += p.vx * dt; p.y += p.vy * dt; const u = p.age / p.life;
+    ctx.strokeStyle = rgba([255, 255, 255], (1 - u) * 0.9 * dim); ctx.lineWidth = 1.4 * S;
+    ctx.beginPath(); ctx.moveTo(p.x - p.vx * 0.03, p.y - p.vy * 0.03); ctx.lineTo(p.x, p.y); ctx.stroke();
+  }
+
+  // 舷窗准星：细环 + 四刻度，随呼吸微亮
+  const breathe = 0.5 + 0.5 * Math.sin(t * 1.9), rr = 22 * S;
+  ctx.strokeStyle = rgba(skin.hi, (0.3 + 0.35 * breathe * th.pulse) * dim); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(cx, cy, rr, 0, 7); ctx.stroke();
+  ctx.beginPath(); for (let i = 0; i < 4; i++) { const a = i * Math.PI / 2; ctx.moveTo(cx + Math.cos(a) * rr * 0.75, cy + Math.sin(a) * rr * 0.75); ctx.lineTo(cx + Math.cos(a) * rr * 1.35, cy + Math.sin(a) * rr * 1.35); } ctx.stroke();
+  ctx.fillStyle = rgba(skin.hi, 0.9 * dim); ctx.fillRect(cx - 1, cy - 1, 2, 2);
+  if (fx.flash > 0) { ctx.fillStyle = rgba(skin.hi, fx.flash * 0.45); ctx.fillRect(0, 0, W, H); }
+  __ldWidgets.draw(st, skin);
+});
+</script></body></html>

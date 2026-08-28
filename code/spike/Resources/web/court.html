@@ -1,0 +1,394 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>Court</title><script src="ld.js"></script><script src="ld-widgets.js"></script></head>
+<body><canvas id="c"></canvas>
+<script>
+/* 篮球场 —— 半场侧视：一侧篮板篮筐，深色亮漆地板，顶上吊一块记分牌，头顶追光打在每颗球上。
+   每个 Claude 会话 = 场上一颗球，位置按会话名排序固定（新会话从天上落下弹到位，走了的淡出）：
+     执行工具 = 低而快的变向运球；思考中 = 高而慢的原地运球；
+     等你输入 = 停球在手上慢转（追光转琥珀呼吸、篮板 LED 条亮琥珀、记分牌 SHOT CLOCK 亮起——读数就是你已经让它等了多久）；
+     空闲 / 停滞 / 转后台 = 球停在地板上、追光变灰。
+   每次真实工具调用 = 那个会话的球出手投篮（球上方标工具名），空心入网、篮网荡开、穿网落地再滚回原位；
+   状态切换 = 场地灯光从中场扫一圈；充能完成 = 全场球一起弹起、记分牌闪 FULL ENERGY；低电量 = 灯光闪烁。
+   记分牌只有真数：全局状态、场上会话数、五小时额度（能量条 + 重置倒计时）、SHOT CLOCK（等待最久的会话等了多久）。
+   没有比分——因为没有真的比分。球永远是篮球橘（它是球，不是状态灯）；状态靠灯光 / 动作 / 记分牌表达，等你输入照项目约定用琥珀。 */
+const cv = document.getElementById('c'), ctx = cv.getContext('2d', { alpha: false });
+const MONO = "'SF Mono','Menlo','Consolas',monospace";
+let W = 0, H = 0, S = 1;
+const PAL = { idle: [0x4c,0xb8,0xf0], thinking: [0xa8,0xa0,0xff], running: [0x44,0xf4,0xdc], waiting: [0xff,0xb6,0x4a] };
+const GREY = [0x7a,0x82,0x90];
+const LEATHER = { hi: [0xf8,0xa2,0x62], base: [0xd9,0x66,0x28], lo: [0x5e,0x24,0x0c], seam: [0x2c,0x12,0x08] };
+const RIM = [0xf2,0x7c,0x2e];
+const PHASE_WORD = { idle: 'STANDBY', thinking: 'PROCESSING', running: 'EXECUTING', waiting: 'AWAITING' };
+const rgba = (c, a) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a === undefined ? 1 : a})`;
+const rnd = (a, b) => a + Math.random() * (b - a);
+const pad = n => String(n).padStart(2, '0');
+// 时长：不到一小时 MM:SS，超过 H:MM:SS（等你输入不设上限）
+const clockStr = s => { s = Math.max(0, Math.floor(s)); return s < 3600 ? `${pad(Math.floor(s / 60))}:${pad(s % 60)}` : `${Math.floor(s / 3600)}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`; };
+// 文字色至少要亮（与小工具层同一规则）
+function lift(c) { const m = Math.max(c[0], c[1], c[2]); if (m >= 0xa0) return c; const k = m > 0 ? 0xd8 / m : 1; return c.map(v => Math.min(255, v * k + 40)); }
+function resize() { W = cv.width = innerWidth; H = cv.height = innerHeight; S = Math.min(W, H) / 900; floorCache = null; }
+addEventListener('resize', resize);
+
+// 皮肤自声明的设置项：设置页 / ./ld skin <id> <值> 都能改，这里只读 __ld.config.skin
+__ld.declarePrefs([
+  { id: 'hoopSide',   name: '篮筐在哪一侧',   type: 'choice', default: 'left', options: [{ id: 'left', name: '左侧（桌面图标多在右边）' }, { id: 'right', name: '右侧' }] },
+  { id: 'ballSize',   name: '球的大小',       type: 'choice', default: 'medium', options: [{ id: 'small', name: '小' }, { id: 'medium', name: '中' }, { id: 'large', name: '大' }] },
+  { id: 'scoreboard', name: '记分牌',         type: 'bool',   default: true },
+  { id: 'labels',     name: '球下标会话名',   type: 'bool',   default: true },
+  { id: 'reflection', name: '地板倒影',       type: 'bool',   default: true },
+]);
+const P = () => __ld.config.skin;
+let bounds = { top: 0, bottom: 0, left: 0, right: 0 };   // 可见桌面内缩量（宿主给；浏览器里调试为 0）
+let floorCache = null, floorKey = '';
+resize();
+
+/* ── 场地几何：每帧按边界 / 设置算一次（都是几次加减） ─────────────────────── */
+function geom() {
+  const top = bounds.top, bottom = H - bounds.bottom;
+  const r = ({ small: 15, medium: 22, large: 30 }[P().ballSize] || 20) * S;
+  const yF = bottom - 230 * S;                                  // 地板线
+  const side = P().hoopSide === 'right' ? 1 : -1;              // -1：篮筐在左，球往左投
+  const edge = side < 0 ? bounds.left : W - bounds.right;      // 篮板挂的那面"墙"
+  const xBoard = edge - side * 96 * S;
+  const rimW = r * 2.5, rimY = yF - 300 * S;
+  const rimX0 = xBoard - side * 7 * S, rimX1 = rimX0 - side * rimW;
+  const rimCx = (rimX0 + rimX1) / 2, netH = r * 2.7;
+  const inner = xBoard - side * (rimW + 170 * S);              // 球活动区：篮筐前方到对侧边线
+  const outer = side < 0 ? W - bounds.right - 110 * S : bounds.left + 110 * S;
+  return { top, bottom, r, yF, side, edge, xBoard, rimW, rimY, rimX0, rimX1, rimCx, netH,
+           courtL: Math.min(inner, outer), courtR: Math.max(inner, outer) };
+}
+let G = 2400;   // 重力 px/s²（S=1 时）；每帧按 S 缩放
+
+/* ── 球：一颗会话一颗球 ───────────────────────────────────────────────────
+   mode：enter 新球从天上落下 | rest 停在地板 | hold 停球在手 | dribble 运球 | shot 出手飞行 | net 穿网 | drop 落地弹跳 | return 滚回原位 */
+const balls = new Map(), HOUSE = '__house';
+const BEHAVIOR = { rest: 1, hold: 1, dribble: 1 };   // 由会话状态决定的"常态"模式，事件模式（shot…）结束后回到这里
+const net = { hitT: -1e9 };
+const sessLabel = s => (s.nameUserSet && s.name ? s.name : (s.project || '?')) + (s.kind === 'bg' ? ' ~' : '');
+function newBall(key, g, home) {
+  return { key, label: '', project: null, phase: 'idle', stalled: false, parked: false, idle: 0,
+           r: g.r, home, x: home, y: g.top - g.r * 2, vx: 0, vy: 0, a: rnd(0, 6.283), w: 0, cross: rnd(0, 6.283),
+           squash: 0, mode: 'enter', fade: 0, dying: false, pending: 0, aimX: 0, tag: '' };
+}
+function desiredMode(b) { return (b.stalled || b.parked || b.phase === 'idle') ? 'rest' : b.phase === 'waiting' ? 'hold' : 'dribble'; }
+const dribbleH = b => (b.phase === 'running' ? 70 : 140) * S;   // 执行中低快、思考中高慢
+const lightColor = b => (b.stalled || b.parked) ? GREY : (PAL[b.phase] || PAL.idle);
+
+// 会话 → 球的对账：新会话建球、消失的淡出、家位沿球场均匀分布；顺带找出等待最久的会话给 SHOT CLOCK
+function syncBalls(st, g) {
+  const useSessions = (__ld.config.reactions || {}).satellites !== false;   // satellites 关 = 不按会话画球，只留一颗跟全局状态
+  const all = st.sessions || [];
+  const ss = useSessions ? all.slice().sort((a, b) => (sessLabel(a) < sessLabel(b) ? -1 : 1)) : [];
+  const seen = new Set(), list = [];
+  let wait = null;
+  for (const s of all) if (s.phase === 'waiting' && !s.stalled && !s.parked && (!wait || (s.idleSeconds || 0) > wait.seconds))
+    wait = { label: sessLabel(s).toUpperCase(), seconds: s.idleSeconds || 0 };
+  ss.forEach(s => {
+    let key = `${s.name || ''}|${s.project || ''}|${s.kind || ''}`; while (seen.has(key)) key += '+'; seen.add(key);
+    let b = balls.get(key); if (!b) { b = newBall(key, g, (g.courtL + g.courtR) / 2); balls.set(key, b); }
+    b.dying = false; b.label = sessLabel(s).toUpperCase(); b.project = s.project || null; b.phase = s.phase || 'idle';
+    b.stalled = !!s.stalled; b.parked = !!s.parked; b.idle = s.idleSeconds || 0;
+    list.push(b);
+  });
+  if (!list.length) {   // 没有会话：一颗"馆球"跟着全局状态，不标名字
+    let b = balls.get(HOUSE); if (!b) { b = newBall(HOUSE, g, (g.courtL + g.courtR) / 2); balls.set(HOUSE, b); }
+    b.dying = false; b.label = ''; b.project = null; b.phase = st.phase || 'idle'; b.stalled = b.parked = false; b.idle = 0;
+    seen.add(HOUSE); list.push(b);
+  }
+  for (const [k, b] of balls) if (!seen.has(k)) b.dying = true;
+  const n = list.length, span = g.courtR - g.courtL;
+  list.forEach((b, i) => {
+    b.home = n === 1 ? g.courtL + span / 2 : g.courtL + (i + 0.5) / n * span; b.r = g.r;
+    if (b.mode === 'enter' && b.fade === 0) b.x = b.home;   // 刚建的球直接在自家位置上方落下
+  });
+  return { list, wait, count: all.length };
+}
+
+function stepBall(b, g, dt, nowS) {
+  const floorY = g.yF - b.r;
+  if (BEHAVIOR[b.mode]) {   // 常态模式跟着会话状态切换；静止起步运球给一个初速度
+    const m = desiredMode(b);
+    if (m !== b.mode) { b.mode = m; if (m === 'dribble' && b.y >= floorY - 1) b.vy = -Math.sqrt(2 * G * dribbleH(b)) * 0.7; }
+  }
+  switch (b.mode) {
+    case 'enter': case 'drop': {   // 自由落体 + 落地弹跳（恢复系数 0.55），弹不起来了就滚回家
+      b.vy += G * dt; b.x += b.vx * dt; b.y += b.vy * dt; b.a += b.w * dt;
+      if (b.y >= floorY) { b.y = floorY; b.squash = 1; if (b.vy < 110 * S) { b.vy = 0; b.mode = 'return'; } else b.vy = -b.vy * 0.55; }
+      break; }
+    case 'return': {   // 纯滚动回家：角速度 = v / r
+      const dx = b.home - b.x;
+      if (Math.abs(dx) < 4 * S) { b.x = b.home; b.vx = 0; b.w *= 0.5; b.mode = desiredMode(b); if (b.mode === 'dribble') b.vy = -Math.sqrt(2 * G * dribbleH(b)) * 0.7; break; }
+      b.vx = Math.sign(dx) * Math.min(760 * S, 200 * S + Math.abs(dx) * 2.2);
+      b.x += b.vx * dt; b.y = floorY; b.w = b.vx / b.r; b.a += b.w * dt;
+      break; }
+    case 'rest': {
+      b.y += (floorY - b.y) * Math.min(1, dt * 6); if (b.y > floorY) b.y = floorY;
+      b.x += (b.home - b.x) * Math.min(1, dt * 3); b.w *= Math.max(0, 1 - dt * 2.5); b.a += b.w * dt;
+      break; }
+    case 'hold': {   // 停球在手：抬到手上慢转，轻微起伏
+      const ty = floorY - 1.45 * b.r + Math.sin(nowS * 2.2) * 2 * S;
+      b.y += (ty - b.y) * Math.min(1, dt * 5); b.x += (b.home - b.x) * Math.min(1, dt * 3);
+      b.w += (2.6 - b.w) * Math.min(1, dt * 2); b.a += b.w * dt;
+      break; }
+    case 'dribble': {   // 重力下落、触地由"手"补回到目标高度；执行中还做左右变向
+      b.vy += G * dt; b.y += b.vy * dt;
+      if (b.y >= floorY) { b.y = floorY; b.vy = -Math.sqrt(2 * G * dribbleH(b)); b.squash = 1; b.w = rnd(-5, 5); }
+      if (b.phase === 'running') { b.cross += dt * 2.6; b.x += (b.home + Math.sin(b.cross) * 44 * S - b.x) * Math.min(1, dt * 7); }
+      else b.x += (b.home - b.x) * Math.min(1, dt * 3);
+      b.a += b.w * dt;
+      break; }
+    case 'shot': {   // 抛物线；下落穿过篮圈平面 = 进球
+      b.vy += G * dt; b.x += b.vx * dt; b.y += b.vy * dt; b.a += b.w * dt;
+      if (b.vy > 0 && b.y >= g.rimY) { b.y = g.rimY; b.x = b.aimX; b.mode = 'net'; b.vy *= 0.3; b.vx = 0; net.hitT = nowS; }
+      break; }
+    case 'net': {   // 网里减速下滑，出网口后自由落体
+      b.vy += G * 0.3 * dt; b.y += b.vy * dt; b.a += b.w * 0.3 * dt;
+      if (b.y > g.rimY + g.netH + b.r * 0.6) { b.mode = 'drop'; b.vx = -g.side * rnd(140, 260) * S; b.w = b.vx / b.r; }
+      break; }
+  }
+  b.squash = Math.max(0, b.squash - dt * 6);
+}
+
+// 出手：解一条经过篮圈中心、顶点高于篮圈 150·S 的抛物线；落点在圈内按工具名微偏（只是视觉变化，不是数据）。忙着就排队（最多 2 个）
+function shoot(b, g, tool) {
+  if (!BEHAVIOR[b.mode] || b.dying) { b.pending = Math.min(2, b.pending + 1); return; }
+  let h = 0; for (const ch of String(tool || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  b.aimX = g.rimCx - g.side * ((h % 1000) / 1000 - 0.5) * g.rimW * 0.3;
+  const vyT = Math.sqrt(2 * G * 150 * S), dy = g.rimY - b.y;                 // 到达篮圈时的竖直速度（决定弧顶高度）
+  const T = (vyT + Math.sqrt(vyT * vyT - 2 * G * dy)) / G;                   // 飞行时间
+  b.vx = (b.aimX - b.x) / T; b.vy = vyT - G * T; b.w = -Math.sign(b.vx) * 7;   // 后旋
+  b.mode = 'shot'; b.tag = String(tool || '').toUpperCase().slice(0, 18);
+}
+// 充能完成：全场一起弹起（走 drop 的落地弹跳，再滚回家）
+function hop(b) { if (BEHAVIOR[b.mode] && !b.dying) { b.mode = 'drop'; b.vy = -Math.sqrt(2 * G * 220 * S); b.vx = 0; } }
+// 工具调用归属：同项目里正在执行的会话优先，其次同项目任一，再退到任一执行中的球，最后第一颗
+function ballForTool(list, e) {
+  const same = list.filter(b => b.project && b.project === e.project);
+  return same.find(b => b.phase === 'running') || same[0] || list.find(b => b.phase === 'running') || list[0];
+}
+
+/* ── 绘制 ───────────────────────────────────────────────────────────────── */
+function text(str, x, y, size, color, alpha, align, weight) {
+  ctx.font = `${weight || 400} ${size * S}px ${MONO}`; ctx.textAlign = align || 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = rgba(color, alpha); ctx.fillText(str, x, y);
+}
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+
+// 地板（木纹 + 场地画线）是静态的：缓存到离屏 canvas，key = 尺寸 + 篮筐侧 + 量化到 16 级的状态色，渐变期间重画十几次、稳定后只剩一次 drawImage
+function floorLayer(g, col) {
+  const key = `${W}|${H}|${Math.round(g.yF)}|${g.side}|${Math.round(g.xBoard)}|${col.map(v => v >> 4).join(',')}`;
+  if (floorCache && floorKey === key) return floorCache;
+  floorKey = key;
+  const bandH = Math.max(1, Math.ceil(H - g.yF));   // 画到屏幕底：Dock 半透明，别露黑边
+  if (!floorCache || floorCache.width !== W || floorCache.height !== bandH) { floorCache = document.createElement('canvas'); floorCache.width = W; floorCache.height = bandH; }
+  const c = floorCache.getContext('2d');
+  const gr = c.createLinearGradient(0, 0, 0, bandH);   // 深色亮漆枫木：近地板线最亮，向观众渐暗
+  gr.addColorStop(0, '#2b1e14'); gr.addColorStop(0.3, '#1c130d'); gr.addColorStop(1, '#0c0805');
+  c.fillStyle = gr; c.fillRect(0, 0, W, bandH);
+  const K = 1.6, cx = W / 2;                            // 伪透视：越靠下（越近）横向越向外扩
+  const px = (x, y) => cx + (x - cx) * (1 + (K - 1) * y / bandH);
+  c.strokeStyle = 'rgba(255,220,180,0.05)'; c.lineWidth = 1; c.beginPath();   // 板缝
+  for (let i = 1; i <= 10; i++) { const y = Math.round(bandH * Math.pow(i / 10, 1.7)) + 0.5; c.moveTo(0, y); c.lineTo(W, y); }
+  for (let x = cx % (64 * S); x < W; x += 64 * S) { c.moveTo(x, 0); c.lineTo(px(x, bandH), bandH); }
+  c.stroke();
+  // 场地画线（状态色）：三秒区、三分弧、半场线 + 中圈
+  c.strokeStyle = rgba(col, 0.26); c.lineWidth = 2; c.lineJoin = 'round';
+  const s = g.side, keyNear = g.xBoard + s * 12 * S, keyFar = g.xBoard - s * 300 * S, keyD = bandH * 0.62;
+  c.beginPath(); c.moveTo(px(keyNear, 0), 0); c.lineTo(px(keyFar, 0), 0); c.lineTo(px(keyFar, keyD), keyD); c.lineTo(px(keyNear, keyD), keyD); c.stroke();
+  c.beginPath(); c.ellipse(px(g.rimCx, bandH * 0.1), bandH * 0.1, 560 * S, bandH * 0.86, 0, 0, Math.PI * 2); c.stroke();
+  const half = s < 0 ? W - bounds.right - 44 * S : bounds.left + 44 * S;
+  c.beginPath(); c.moveTo(half, 0); c.lineTo(px(half, bandH), bandH); c.stroke();
+  c.beginPath(); c.ellipse(px(half, bandH * 0.45), bandH * 0.45, 120 * S * 1.27, bandH * 0.4, 0, 0, Math.PI * 2); c.stroke();
+  // 地板线高光（灯光在漆面上的反光）
+  const hg = c.createLinearGradient(0, 0, 0, 22 * S); hg.addColorStop(0, rgba(col, 0.2)); hg.addColorStop(1, rgba(col, 0));
+  c.fillStyle = hg; c.fillRect(0, 0, W, 22 * S);
+  c.fillStyle = rgba(col, 0.55); c.fillRect(0, 0, W, 1.5);
+  return floorCache;
+}
+
+// 头顶追光：光锥打在每颗球的家位，颜色 = 该会话状态；等你输入的琥珀光呼吸
+function drawLights(list, g, nowS, dim) {
+  for (const b of list) {
+    const c = lightColor(b), breathe = b.mode === 'hold' ? 0.7 + 0.3 * Math.sin(nowS * 3) : 1, a = b.fade * dim * breathe;
+    const bg = ctx.createLinearGradient(0, g.top, 0, g.yF); bg.addColorStop(0, rgba(c, 0)); bg.addColorStop(1, rgba(c, 0.085 * a));
+    ctx.fillStyle = bg; ctx.beginPath(); ctx.moveTo(b.home - 26 * S, g.top); ctx.lineTo(b.home + 26 * S, g.top);
+    ctx.lineTo(b.home + 120 * S, g.yF); ctx.lineTo(b.home - 120 * S, g.yF); ctx.closePath(); ctx.fill();
+    const R = 130 * S, pg = ctx.createRadialGradient(0, 0, 0, 0, 0, R); pg.addColorStop(0, rgba(c, (b.mode === 'hold' ? 0.5 : 0.36) * a)); pg.addColorStop(1, rgba(c, 0));
+    ctx.save(); ctx.translate(b.home, g.yF); ctx.scale(1, 0.22); ctx.fillStyle = pg; ctx.beginPath(); ctx.arc(0, 0, R, 0, 7); ctx.fill(); ctx.restore();
+  }
+}
+
+// 篮板 + 墙架（画在球后面）；篮板 LED 条：有会话等你 → 琥珀呼吸，否则状态色微亮
+function drawBoard(g, col, waitingAny, nowS, dim) {
+  const s = g.side, xb = g.xBoard, bw = 12 * S, top = g.rimY - 96 * S, bot = g.rimY + 28 * S;
+  ctx.strokeStyle = 'rgba(150,160,175,0.5)'; ctx.lineWidth = 4 * S; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(g.edge, top + 12 * S); ctx.lineTo(xb, top + 12 * S); ctx.moveTo(g.edge, top - 70 * S); ctx.lineTo(xb, top + 16 * S); ctx.stroke();
+  ctx.fillStyle = 'rgba(190,220,240,0.2)'; ctx.fillRect(xb - bw / 2, top, bw, bot - top);
+  ctx.strokeStyle = 'rgba(220,235,245,0.7)'; ctx.lineWidth = 1.5; ctx.strokeRect(xb - bw / 2, top, bw, bot - top);
+  const ledC = waitingAny ? PAL.waiting : col, ledA = (waitingAny ? 0.55 + 0.45 * Math.sin(nowS * 3.2) : 0.4) * dim;
+  ctx.save(); ctx.shadowColor = rgba(ledC, 0.9); ctx.shadowBlur = 10 * S; ctx.fillStyle = rgba(ledC, ledA);
+  ctx.fillRect(s < 0 ? xb + bw / 2 - 3 * S : xb - bw / 2, top, 3 * S, bot - top); ctx.restore();
+}
+
+// 篮圈 + 篮网（画在球前面，球穿网时被网线盖住）：进球后网荡开再收回
+function drawRimNet(g, nowS) {
+  const x0 = g.rimX0, x1 = g.rimX1, y = g.rimY, N = 8, dtn = nowS - net.hitT;
+  const k = dtn < 2.5 ? Math.exp(-dtn * 2.2) * Math.sin(dtn * 13) : 0, bul = dtn < 2.5 ? Math.exp(-dtn * 3) : 0;
+  ctx.strokeStyle = 'rgba(235,240,245,0.6)'; ctx.lineWidth = 1.2; ctx.lineCap = 'round';
+  ctx.beginPath();
+  for (let i = 0; i < N; i++) {
+    const u = i / (N - 1), xt = x0 + (x1 - x0) * u, yb = y + g.netH * (1 + 0.12 * k);
+    const xbm = g.rimCx + (xt - g.rimCx) * (0.6 + 0.3 * bul), mx = (xt + xbm) / 2 + (i % 2 ? 3 : -3) * S * (1 + 3 * bul);
+    ctx.moveTo(xt, y); ctx.quadraticCurveTo(mx, (y + yb) / 2, xbm, yb);
+  }
+  ctx.stroke();
+  for (let j = 1; j <= 3; j++) {
+    const v = j / 3, yy = y + g.netH * v * (1 + 0.12 * k * v), hw = g.rimW / 2 * (1 - 0.4 * v) * (1 + 0.3 * bul * v);
+    ctx.beginPath(); ctx.ellipse(g.rimCx, yy, hw, 2.5 * S, 0, 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.strokeStyle = rgba(RIM, 0.95); ctx.lineWidth = 3.5 * S;
+  ctx.beginPath(); ctx.ellipse(g.rimCx, y, g.rimW / 2, 3.5 * S, 0, 0, Math.PI * 2); ctx.stroke();
+  ctx.lineWidth = 3 * S; ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(g.xBoard, y); ctx.stroke();   // 圈到篮板的连接件
+}
+
+function drawBall(b, alpha) {
+  const r = b.r; ctx.save(); ctx.translate(b.x, b.y); ctx.globalAlpha = alpha;
+  if (b.squash > 0) { const k = 1 - 0.16 * b.squash; ctx.translate(0, r * (1 - k)); ctx.scale(1 + 0.1 * b.squash, k); }
+  const gr = ctx.createRadialGradient(-r * 0.38, -r * 0.42, r * 0.08, 0, 0, r);   // 高光固定左上（跟光源，不跟自旋）
+  gr.addColorStop(0, rgba(LEATHER.hi)); gr.addColorStop(0.45, rgba(LEATHER.base)); gr.addColorStop(1, rgba(LEATHER.lo));
+  ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(0, 0, r, 0, 7); ctx.fill();
+  ctx.clip();
+  ctx.strokeStyle = rgba(LEATHER.lo, 0.7); ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(0, 0, r - 0.75, 0, 7); ctx.stroke();   // 边缘暗环
+  ctx.rotate(b.a);   // 接缝随自旋转：十字 + 两条从极到极外弓的侧缝
+  ctx.strokeStyle = rgba(LEATHER.seam, 0.9); ctx.lineWidth = Math.max(1, r * 0.085); ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-r, 0); ctx.lineTo(r, 0); ctx.moveTo(0, -r); ctx.lineTo(0, r); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(0, 0, r * 0.55, r, 0, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+}
+// 地面阴影：离地越高越小越淡
+function drawShadow(b, g, alpha) {
+  const hN = Math.max(0, Math.min(1, (g.yF - b.r - b.y) / (220 * S)));
+  const rx = b.r * (1.15 - 0.45 * hN), a = 0.4 * (1 - hN * 0.75) * alpha;
+  if (a <= 0.01) return;
+  const sg = ctx.createRadialGradient(0, 0, 0, 0, 0, rx); sg.addColorStop(0, `rgba(0,0,0,${a})`); sg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.save(); ctx.translate(b.x, g.yF + 2 * S); ctx.scale(1, 0.3); ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(0, 0, rx, 0, 7); ctx.fill(); ctx.restore();
+}
+// 漆面倒影：镜像到地板线下方，离地越高越淡
+function drawReflection(b, g, alpha) {
+  const a = alpha * 0.16 * Math.max(0, 1 - (g.yF - b.r - b.y) / (260 * S));
+  if (a <= 0.005) return;
+  ctx.save(); ctx.beginPath(); ctx.rect(0, g.yF, W, H - g.yF); ctx.clip();
+  ctx.translate(0, 2 * g.yF); ctx.scale(1, -1); drawBall(b, a); ctx.restore();
+}
+function drawLabel(b, g, dim) {
+  if (!b.label) return;
+  const c = lift(lightColor(b)), a = b.fade * (0.55 + 0.45 * dim);
+  ctx.save(); ctx.shadowColor = 'rgba(0,0,0,0.85)'; ctx.shadowBlur = 5 * S;
+  text(b.label.slice(0, 16), b.home, g.yF + 22 * S, 11, c, 0.9 * a, 'center', 600);
+  const word = b.parked ? 'PARKED' : b.stalled ? 'STALLED' : (PHASE_WORD[b.phase] || 'STANDBY');
+  // 等你输入 = 等了多久；工作中 ≥2 分钟没动 = 沉默多久（括号，如实反映"在跑但没输出"）
+  const extra = (b.stalled || b.parked) ? '' : b.phase === 'waiting' ? '  ' + clockStr(b.idle) : (b.idle >= 120 && b.phase !== 'idle') ? `  (${clockStr(b.idle)})` : '';
+  text(word + extra, b.home, g.yF + 36 * S, 10, c, 0.62 * a, 'center');
+  ctx.restore();
+}
+
+// 记分牌：吊在场地正上方。只有真数：全局状态 / 场上会话数 / 五小时额度 / SHOT CLOCK（等待最久的会话等了多久）
+function drawScoreboard(g, st, pw, col, wait, count, nowS, dim) {
+  const w = Math.min(470 * S, W * 0.6), h = 100 * S, x = (W - w) / 2, y = g.top + 24 * S, hi = lift(col);
+  ctx.strokeStyle = 'rgba(120,130,145,0.55)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(x + 40 * S, 0); ctx.lineTo(x + 40 * S, y); ctx.moveTo(x + w - 40 * S, 0); ctx.lineTo(x + w - 40 * S, y); ctx.stroke();
+  roundRect(x, y, w, h, 8 * S); ctx.fillStyle = 'rgba(9,11,16,0.93)'; ctx.fill();
+  ctx.strokeStyle = rgba(col, 0.55 * dim); ctx.lineWidth = 1.5; ctx.stroke();
+  const divX = x + w - 150 * S;
+  ctx.strokeStyle = rgba(col, 0.25); ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(divX, y + 12 * S); ctx.lineTo(divX, y + h - 12 * S); ctx.stroke();
+  ctx.save(); ctx.shadowColor = rgba(hi, 0.8); ctx.shadowBlur = 10 * S;
+  // 左列：状态 + 会话数；充能完成后 1.6s 内闪 FULL ENERGY
+  const burst = fx.burst != null && nowS - fx.burst < 1.6;
+  const tag = burst && Math.floor((nowS - fx.burst) * 4) % 2 === 0 ? 'FULL ENERGY' : (PHASE_WORD[st.phase] || 'STANDBY');
+  text(tag, x + 18 * S, y + 36 * S, 21, hi, 0.98 * dim, 'left', 700);
+  ctx.restore();
+  text(count ? `${count} ON COURT` : 'COURT EMPTY', x + 18 * S, y + 54 * S, 11, hi, 0.65 * dim);
+  if (pw) {   // 能量条：五小时剩余（与 POWER 小工具同一份换算）；< 20% 转琥珀
+    const cells = 10, cw = 13 * S, cy = y + 70 * S, filled = Math.round(pw.remain / 10), lc = pw.remain < 20 ? PAL.waiting : hi;
+    for (let i = 0; i < cells; i++) { ctx.fillStyle = i < filled ? rgba(lc, 0.9 * dim) : rgba(col, 0.15); ctx.fillRect(x + 18 * S + i * (cw + 3 * S), cy, cw, 7 * S); }
+    let s = `${Math.round(pw.remain)}%`;
+    if (pw.resetsAt > 0 && !pw.recharged) s += `   RESET ${__ldWidgets.hms(pw.resetsAt - pw.now)}`;
+    if (pw.stale) s += `   AS OF ${__ldWidgets.clock(pw.recordedAt)}`;
+    text(s, x + 18 * S + cells * (cw + 3 * S) + 8 * S, cy + 7 * S, 11, hi, 0.7 * dim);
+  }
+  // 右列：SHOT CLOCK —— 有会话等你输入才亮，读数是它等了多久
+  const on = !!wait, dc = on ? PAL.waiting : col, blink = on ? 0.85 + 0.15 * Math.sin(nowS * 3.2) : 0.22;
+  ctx.save(); if (on) { ctx.shadowColor = rgba(dc, 0.9); ctx.shadowBlur = 14 * S; }
+  text(on ? clockStr(wait.seconds) : '--:--', x + w - 18 * S, y + 46 * S, 30, dc, blink * dim, 'right', 700);
+  ctx.restore();
+  text('SHOT CLOCK', x + w - 18 * S, y + 66 * S, 10, hi, (on ? 0.7 : 0.35) * dim, 'right', 600);
+  if (on) text('YOUR BALL · ' + wait.label.slice(0, 12), x + w - 18 * S, y + 82 * S, 10, PAL.waiting, 0.8 * dim, 'right');
+}
+
+/* ── 主循环 ─────────────────────────────────────────────────────────────── */
+const fx = { flash: [], burst: null }, col = PAL.idle.slice();
+let lastNow = performance.now();
+__ld.loop((t, th, st) => {
+  const now = performance.now(), nowS = now / 1000, dt = Math.min(0.05, (now - lastNow) / 1000); lastNow = now;
+  const ins = st.host && st.host.insets;
+  if (ins) bounds = { top: ins.top || 0, bottom: ins.bottom || 0, left: ins.left || 0, right: ins.right || 0 };
+  G = 2400 * S;
+  const g = geom(), pw = __ldWidgets.computePower(st.quota), ev = __ld.events(st, pw);
+  const target = PAL[st.phase] || PAL.idle; for (let i = 0; i < 3; i++) col[i] += (target[i] - col[i]) * 0.05;
+  const { list, wait, count } = syncBalls(st, g);
+
+  // 真实事件 → 动作
+  if (ev.tool && st.recentTools && st.recentTools[0]) { const b = ballForTool(list, st.recentTools[0]); if (b) shoot(b, g, st.recentTools[0].tool); }
+  if (ev.phase) fx.flash.push(nowS);
+  if (ev.recharge) { fx.burst = nowS; for (const b of list) hop(b); }
+  const dim = ev.lowPower && pw && __ld.flicker(t, pw.remain) ? 0.45 : 1;
+  fx.flash = fx.flash.filter(t0 => nowS - t0 < 0.8);
+
+  // 物理（两个子步）+ 排队的投篮 + 淡入淡出
+  for (const [k, b] of balls) {
+    for (let i = 0; i < 2; i++) stepBall(b, g, dt / 2, nowS);
+    if (b.pending > 0 && BEHAVIOR[b.mode] && !b.dying) { b.pending--; shoot(b, g, b.tag); }
+    if (b.dying) { b.fade -= dt * 1.5; if (b.fade <= 0) balls.delete(k); }
+    else b.fade = Math.min(1, b.fade + dt * 2);
+  }
+
+  // 背景：黑暗球馆 + 场地上方一团状态色环境光
+  ctx.fillStyle = '#05060a'; ctx.fillRect(0, 0, W, H);
+  const bgg = ctx.createRadialGradient(W / 2, g.yF, 0, W / 2, g.yF, Math.max(W, H) * 0.7);
+  bgg.addColorStop(0, rgba(col, 0.1 * dim)); bgg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = bgg; ctx.fillRect(0, 0, W, g.yF);
+  ctx.drawImage(floorLayer(g, col), 0, g.yF);
+  drawLights(list, g, nowS, dim);
+  // 状态切换：灯光从中场扫一圈（地板上的椭圆环）
+  for (const t0 of fx.flash) {
+    const u = (nowS - t0) / 0.8;
+    ctx.save(); ctx.beginPath(); ctx.rect(0, g.yF - 2, W, H - g.yF + 2); ctx.clip();
+    ctx.strokeStyle = rgba(col, (1 - u) * 0.55); ctx.lineWidth = 2 * S;
+    ctx.beginPath(); ctx.ellipse(W / 2, g.yF + 6 * S, 40 * S + u * W * 0.6, 6 * S + u * (H - g.yF) * 0.7, 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+  }
+  drawBoard(g, col, !!wait, nowS, dim);
+  const ordered = [...balls.values()].sort((a, b) => a.x - b.x);
+  const showRef = P().reflection !== false, showLabels = P().labels !== false;
+  for (const b of ordered) { drawShadow(b, g, b.fade); if (showRef) drawReflection(b, g, b.fade); }
+  for (const b of ordered) {
+    drawBall(b, b.fade);
+    if (b.tag && (b.mode === 'shot' || b.mode === 'net')) {   // 飞行中标出这次调用的工具名
+      ctx.save(); ctx.shadowColor = 'rgba(0,0,0,0.85)'; ctx.shadowBlur = 4 * S;
+      text(b.tag, b.x, b.y - b.r - 9 * S, 10, lift(col), 0.9 * b.fade, 'center', 600); ctx.restore();
+    }
+  }
+  if (showLabels) for (const b of ordered) drawLabel(b, g, dim);
+  drawRimNet(g, nowS);
+  if (P().scoreboard !== false) drawScoreboard(g, st, pw, col, wait, count, nowS, dim);
+  __ldWidgets.draw(st, { key: col.map(v => v * 0.6), hi: col }, { heroShowsPower: P().scoreboard !== false });
+});
+
+window.__ldSkinDiag = () => ({
+  hoop: P().hoopSide, netHitAgo: Math.round(performance.now() / 1000 - net.hitT),
+  balls: [...balls.values()].map(b => ({ key: b.key, mode: b.mode, phase: b.phase, x: Math.round(b.x), y: Math.round(b.y), fade: +b.fade.toFixed(2), pending: b.pending })),
+});
+</script></body></html>

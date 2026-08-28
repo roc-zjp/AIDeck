@@ -1,0 +1,129 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>Hologram</title><script src="ld.js"></script><script src="ld-widgets.js"></script><script src="three.bundle.js"></script><script src="ld-3d.js"></script>
+<style>#bg,#gl{position:fixed;left:0;top:0;}</style></head>
+<body><canvas id="bg"></canvas><canvas id="gl"></canvas>
+<script>
+/* 全息投影台 —— 投影台上悬着一个 3D 模型：内置程序化模型（reactor / station / satellite / drone / helix），
+   或用户放进 ~/.config/live-desktop/models/ 的 .glb / .gltf / .fbx（设置页「3D 模型」或 ./ld model <名字> 选择）。
+   带骨骼动画的角色（如 Mixamo 导出的 FBX）会动：动作片段按状态挑、播放速度随活跃度（待机慢放、执行工具全速）。
+   转速随活跃度；工具调用 = 一道扫描面自下而上扫过模型；状态切换 = 全息故障（横带错位）；
+   低电量 = 投影闪烁；底座环上的光点 = 会话（真实数据，按状态着色，等你输入的橙色呼吸并标名字）。
+   两层 canvas：#bg 用 2D 画底座 / 光锥 / 标牌，#gl 用 WebGL 画模型，小工具层在最上面。 */
+const bg = document.getElementById('bg'), ctx = bg.getContext('2d', { alpha: false });
+const glc = document.getElementById('gl');
+const MONO = "'SF Mono','Menlo','Consolas',monospace";
+const SKIN = {
+  idle:     { key: [0x1c,0x5a,0x8c], hi: [0x4c,0xb8,0xf0], tag: 'STANDBY',        cn: '待机'     },
+  thinking: { key: [0x5c,0x54,0xc4], hi: [0xa8,0xa0,0xff], tag: 'PROCESSING',     cn: '推理中'   },
+  running:  { key: [0x14,0x88,0x88], hi: [0x44,0xf4,0xdc], tag: 'EXECUTING',      cn: '执行中'   },
+  waiting:  { key: [0x92,0x58,0x12], hi: [0xff,0xb6,0x4a], tag: 'AWAITING INPUT', cn: '等待指令' },
+};
+const GREY = [0x60, 0x6a, 0x78], AMBER = [0xff, 0x9a, 0x2a];
+let W = 0, H = 0, S = 1;
+const skin = { key: [...SKIN.idle.key], hi: [...SKIN.idle.hi] };
+const rgba = (c, a) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+const cols = ch => (ch.codePointAt(0) > 0x2e7f ? 2 : 1);
+function fit(s, w) { let o = '', n = 0; for (const ch of s) { const c = cols(ch); if (n + c > w) break; o += ch; n += c; } return o; }
+function resize() { W = bg.width = glc.width = innerWidth; H = bg.height = glc.height = innerHeight; S = Math.min(W, H) / 900; }
+addEventListener('resize', resize); resize();
+function text(str, x, y, size, alpha, align, c, weight) {
+  ctx.font = `${weight || 400} ${size * S}px ${MONO}`; ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = rgba(c || skin.hi, alpha); ctx.fillText(str, x, y);
+}
+
+// 模型：跟着 __ld.config.model 走；加载失败如实显示错误，并回落到内置 station 保证台上有东西
+const r3 = __ld3d.available ? __ld3d.Renderer(glc) : null;
+let modelName = null, shownName = '', modelErr = __ld3d.available ? null : (__ld3d.reason || 'WebGL 不可用'), loading = false;
+function ensureModel(name) {
+  if (name === modelName || loading) return;
+  loading = true; const want = name;
+  __ld3d.loadModel(name).then(m => { r3.setModel(m); shownName = want; modelErr = null; })
+    .catch(e => { modelErr = String(e && e.message || e); if (!r3.model) return __ld3d.loadModel('station').then(m => { r3.setModel(m); shownName = 'station'; }); })
+    .finally(() => { modelName = want; loading = false; });
+}
+
+window.__ldSkinDiag = () => Object.assign({ model: shownName, want: modelName, error: modelErr, three: __ld3d.revision || null }, r3 ? r3.meta : {});
+const fx = { scan: null, glitch: 0 };
+let lastNow = performance.now(), yaw = 0, spinT = 0;
+__ld.loop((t, th, st) => {
+  const target = SKIN[st.phase] || SKIN.idle;
+  for (let i = 0; i < 3; i++) { skin.key[i] += (target.key[i] - skin.key[i]) * 0.05; skin.hi[i] += (target.hi[i] - skin.hi[i]) * 0.05; }
+  const now = performance.now(), dt = Math.min(0.1, (now - lastNow) / 1000); lastNow = now;
+  const nowMs = Date.now();
+  const pw = __ldWidgets.computePower(st.quota);
+  const ev = __ld.events(st, pw);
+  if (ev.tool) fx.scan = nowMs;
+  if (ev.phase) fx.glitch = 1;
+  if (ev.recharge) { fx.scan = nowMs; fx.glitch = Math.max(fx.glitch, 0.6); }
+  if (fx.scan && nowMs - fx.scan > 800) fx.scan = null;
+  fx.glitch = Math.max(0, fx.glitch - dt * 3.2);
+  const dim = ev.lowPower && __ld.flicker(t, pw.remain) ? 0.35 : 1;
+  yaw += dt * (0.25 + th.energy * 0.9);          // 自转随活跃度
+  spinT += dt * (0.3 + th.energy * 1.4);         // 部件转动（旋翼 / 环）随活跃度
+  if (r3) ensureModel((__ld.config && __ld.config.model) || 'station');
+
+  // 模型中心略高于屏幕中心，给底座和标牌留位置
+  const ndc = [0, 40 * S / H * 2];
+  const [, baseY] = r3 ? r3.project(0, -1.28, 0, ndc) : [0, H * 0.72];
+  const [bx1] = r3 ? r3.project(1, -1.28, 0, ndc) : [W / 2 + 200 * S];
+  const cx = W / 2, brx = (bx1 - cx) * 1.05, bry = brx * 0.2;
+
+  // 背板 + 网格
+  ctx.fillStyle = '#030609'; ctx.fillRect(0, 0, W, H);
+  const g = ctx.createRadialGradient(cx, baseY, 0, cx, baseY, Math.max(W, H) * 0.5);
+  g.addColorStop(0, rgba(skin.key, 0.16 * dim)); g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = rgba(skin.key, 0.06); ctx.lineWidth = 1; ctx.beginPath();
+  for (let x = cx % (70 * S); x < W; x += 70 * S) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+  for (let y = baseY % (70 * S); y < H; y += 70 * S) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+  ctx.stroke();
+
+  // 光锥（底座 → 模型）+ 底座三圈 + 旋转虚线
+  const [, topY] = r3 ? r3.project(0, 0.2, 0, ndc) : [0, H * 0.4];
+  const cone = ctx.createLinearGradient(0, baseY, 0, topY);
+  cone.addColorStop(0, rgba(skin.key, 0.22 * dim)); cone.addColorStop(1, rgba(skin.key, 0));
+  ctx.fillStyle = cone; ctx.beginPath(); ctx.moveTo(cx - brx * 0.5, baseY); ctx.lineTo(cx - brx * 0.95, topY); ctx.lineTo(cx + brx * 0.95, topY); ctx.lineTo(cx + brx * 0.5, baseY); ctx.closePath(); ctx.fill();
+  for (const [k, a] of [[1, 0.7], [0.72, 0.4], [0.35, 0.25]]) {
+    ctx.strokeStyle = rgba(skin.key, a * dim); ctx.lineWidth = k === 1 ? 1.6 : 1;
+    ctx.beginPath(); ctx.ellipse(cx, baseY, brx * k, bry * k, 0, 0, 7); ctx.stroke();
+  }
+  ctx.save(); ctx.translate(cx, baseY); ctx.rotate(-t * 0.3); ctx.scale(1, bry / brx); ctx.setLineDash([6 * S, 9 * S]);
+  ctx.strokeStyle = rgba(skin.hi, 0.35 * dim); ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(0, 0, brx * 0.86, 0, 7); ctx.stroke(); ctx.restore();
+  // 扫描面掠过时底座跟着亮一下
+  if (fx.scan) { const u = (nowMs - fx.scan) / 800; ctx.strokeStyle = rgba(skin.hi, (1 - u) * 0.6 * dim); ctx.lineWidth = 2 * S; ctx.beginPath(); ctx.ellipse(cx, baseY, brx * (1 + u * 0.3), bry * (1 + u * 0.3), 0, 0, 7); ctx.stroke(); }
+
+  // 会话 = 底座环上的光点（satellites 开关可关）
+  if ((__ld.config.reactions || {}).satellites !== false) {
+    const ss = st.sessions || [];
+    ss.forEach((s, i) => {
+      const a = t * 0.4 + i * Math.PI * 2 / ss.length, x = cx + Math.cos(a) * brx, y = baseY + Math.sin(a) * bry;
+      const off = s.stalled || s.parked, waiting = !off && s.phase === 'waiting';
+      const c = off ? GREY : waiting ? AMBER : (SKIN[s.phase] || SKIN.idle).hi, br = waiting ? 0.6 + 0.4 * Math.sin(t * 3 + i) : 1;
+      ctx.save(); if (!off) { ctx.shadowColor = rgba(c, 0.9); ctx.shadowBlur = (waiting ? 14 : 7) * S; }
+      ctx.fillStyle = rgba(c, (off ? 0.5 : 0.9) * dim); ctx.beginPath(); ctx.arc(x, y, (waiting ? 3.2 + 1.4 * br : 2.6) * S, 0, 7); ctx.fill();
+      if (s.kind === 'bg') { ctx.strokeStyle = rgba(c, 0.7 * dim); ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(x, y, 6 * S, 0, 7); ctx.stroke(); }
+      ctx.restore();
+      if (waiting) text(fit((s.nameUserSet && s.name ? s.name : s.project || '?').toUpperCase(), 14), x + 8 * S, y - 9 * S, 10, 0.9 * dim, 'left', c);
+    });
+  }
+
+  // 模型
+  if (r3) {
+    let scanY = null;
+    if (fx.scan) { const u = (nowMs - fx.scan) / 800; scanY = -1.15 + 2.3 * u; }
+    r3.render({ t, dt, partT: spinT, yaw, phase: st.phase, energy: th.energy, color: skin.key, hi: skin.hi, alpha: dim, scanY, glitch: fx.glitch, ndc });
+  } else {
+    ctx.clearRect && glc.getContext && text('WEBGL UNAVAILABLE', cx, H / 2, 14, 0.8, 'center', skin.hi, 600);
+  }
+
+  // 标牌：状态 + 当前模型（真实：正显示哪个模型 / 加载失败原因）
+  text(target.tag, cx, baseY + 34 * S, 15, 0.9 * dim, 'center', skin.hi, 600);
+  text(target.cn, cx, baseY + 54 * S, 11, 0.55 * dim, 'center', skin.hi);
+  // 标牌全是真话：正显示哪个模型、正在播哪段动作、当前倍速；加载失败写原因
+  const meta = r3 ? r3.meta : {};
+  const clipInfo = meta.clip ? ` · ${meta.clip.replace(/^mixamo\.com$/i, 'MIXAMO').toUpperCase()} ×${meta.timeScale.toFixed(1)}` : '';
+  const label = modelErr ? `MODEL ${String(modelName || '').replace(/^user\//, '').toUpperCase()} · 加载失败：${modelErr}` : shownName ? `MODEL · ${shownName.replace(/^user\//, '').replace(/\.(glb|gltf|fbx)$/i, '').toUpperCase()}${clipInfo}` : (loading ? 'MODEL · LOADING' : '');
+  if (label) text(label, cx, baseY + 74 * S, 9.5, (modelErr ? 0.8 : 0.4) * dim, 'center', modelErr ? AMBER : skin.key);
+  __ldWidgets.draw(st, skin);
+});
+</script></body></html>

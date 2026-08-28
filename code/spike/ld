@@ -11,14 +11,25 @@ case "${1:-status}" in
           case "${2:-}" in
             tl|tr|bl|br) echo "hud $2" >> ~/.live-desktop.cmd
                          echo "状态卡已吸附到 $2（tl左上 tr右上 bl左下 br右下）";;
+            float)       echo "hud float" >> ~/.live-desktop.cmd
+                         echo "状态卡已置顶悬浮：盖在所有应用窗口之上（低于菜单栏与 Dock），全屏 App 里也可见";;
+            desktop)     echo "hud desktop" >> ~/.live-desktop.cmd
+                         echo "状态卡回到桌面图标层之上：只在桌面露出时可见";;
+            through)     echo "hud through" >> ~/.live-desktop.cmd; echo "状态卡已点击穿透（不可拖，./ld hud drag 换回）";;
+            drag)        echo "hud drag" >> ~/.live-desktop.cmd; echo "状态卡可直接拖动";;
             edit|move|"") echo "hud edit" >> ~/.live-desktop.cmd
                          echo "已进入拖动模式：状态卡临时浮到最上层并高亮"
                          echo "→ 直接按住它拖到想要的位置，松手静止 1.5 秒即保存"
                          echo "→ 完全不动则 20 秒后自动退出，位置不变";;
-            *) echo "用法: ./ld hud [tl|tr|bl|br|edit]";;
+            *) echo "用法: ./ld hud [tl|tr|bl|br|edit|float|desktop|through|drag]";;
           esac;;
   pause)  [ -n "$PID" ] && kill -USR1 "$PID" && echo "已切换暂停/恢复" || echo "未运行";;
+  settings) if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi
+          echo "settings" >> ~/.live-desktop.cmd; echo "设置窗口已打开（实时预览 + 小工具槽位 + 事件反应 + 状态卡）";;
   stop)   pkill -f MacOS/LiveDesktopSpike && echo "已退出";;
+  celebrate) if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi
+          echo "celebrate" >> ~/.live-desktop.cmd
+          echo "已触发一次庆祝动作（篮球皮肤：全场闪光 + 投篮 + 记分牌 SCORE +1；预览用，不动 git）";;
   demo)   if [ -n "$PID" ]; then
             pkill -f "ld-demo-loop" 2>/dev/null
             nohup bash -c 'exec -a ld-demo-loop bash -c "for i in 1 2 3 4 5 6 7 8 9; do sleep 12; kill -USR2 '"$PID"' 2>/dev/null || exit; done"' >/dev/null 2>&1 &
@@ -26,19 +37,19 @@ case "${1:-status}" in
             echo "现在把窗口最小化（或 F11 / 四指张开显示桌面），坐着看完三个"
           else echo "未运行，先 ./ld start"; fi;;
   autostart)
-          PLIST=~/Library/LaunchAgents/com.zhoujunpeng.livedesktop.spike.plist
+          PLIST=~/Library/LaunchAgents/com.zhoujunpeng.livedesktop.plist
           case "${2:-on}" in
             on)  DIR="$(pwd)"
                  cat > "$PLIST" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.zhoujunpeng.livedesktop.spike</string>
+  <key>Label</key><string>com.zhoujunpeng.livedesktop</string>
   <key>ProgramArguments</key>
   <array><string>$DIR/build/LiveDesktopSpike.app/Contents/MacOS/LiveDesktopSpike</string><string>--log</string></array>
   <key>WorkingDirectory</key><string>$DIR</string>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 </dict></plist>
 PL
                  launchctl unload "$PLIST" 2>/dev/null
@@ -46,11 +57,44 @@ PL
                  echo "关闭：./ld autostart off";;
             off) launchctl unload "$PLIST" 2>/dev/null; rm -f "$PLIST"; echo "已取消开机自启";;
           esac;;
+  widget) # 小工具槽位（3×3 九点位）：./ld widget <sessions|context|activity|repos|power|clock|system> <tl|tc|tr|ml|mc|mr|bl|bc|br|off>
+          if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi
+          case "${2:-}" in sessions|context|activity|repos|power|clock|system) ;;
+            *) echo "用法: ./ld widget {sessions|context|activity|repos|power|clock|system} {tl|tc|tr|ml|mc|mr|bl|bc|br|off}"; exit 1;; esac
+          case "${3:-}" in tl|tc|tr|ml|mc|mr|bl|bc|br|off) ;;
+            *) echo "槽位: tl/tc/tr 顶排  ml/mc/mr 中排  bl/bc/br 底排  off 关闭"; exit 1;; esac
+          echo "widget $2 $3" >> ~/.live-desktop.cmd; echo "小工具 $2 → $3";;
+  fx)     # 事件反应开关：./ld fx <toolPulse|phaseRipple|rechargeBurst|lowPowerFlicker|satellites> on|off
+          if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi
+          case "${2:-}" in toolPulse|phaseRipple|rechargeBurst|lowPowerFlicker|satellites) ;;
+            *) echo "用法: ./ld fx {toolPulse|phaseRipple|rechargeBurst|lowPowerFlicker|satellites} on|off"; exit 1;; esac
+          case "${3:-}" in on|off) ;; *) echo "用法: ./ld fx <id> on|off"; exit 1;; esac
+          echo "fx $2 $3" >> ~/.live-desktop.cmd; echo "事件反应 $2 → $3";;
+  model)  # 3D 模型（hologram 皮肤）：./ld model 列出可选；./ld model <内置名|user/文件名> 选中
+          if [ -z "${2:-}" ]; then
+            echo "内置：reactor 反应堆 · station 空间站 · satellite 卫星 · drone 无人机 · helix 双螺旋"
+            echo "自定义（~/.config/live-desktop/models/*.glb）："; ls ~/.config/live-desktop/models/*.glb 2>/dev/null | sed 's|.*/|  user/|' || true
+            echo "当前：$(defaults read com.zhoujunpeng.livedesktop model 2>/dev/null || echo station)"; exit 0; fi
+          if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi
+          shift; echo "model $*" >> ~/.live-desktop.cmd; echo "3D 模型 → $*（仅 hologram 皮肤显示）";;
+  skin)   # 当前皮肤自声明的设置项：./ld skin <id> <值>（on/off、数字、选项 id）；./ld skin reset 恢复默认；设置页里也能改
+          if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi
+          case "${2:-}" in
+            reset) echo "skin reset" >> ~/.live-desktop.cmd; echo "当前皮肤的设置项已恢复默认";;
+            "")    echo "用法: ./ld skin <id> <值> | ./ld skin reset   （可用的 id 见设置页「皮肤设置」或皮肤源码里的 declarePrefs）"; exit 1;;
+            *)     [ -z "${3:-}" ] && { echo "用法: ./ld skin <id> <值>"; exit 1; }; shift; echo "skin $*" >> ~/.live-desktop.cmd; echo "皮肤设置 $1 → ${*:2}";;
+          esac;;
+  quota)  # 额度数据源：把 ld-statusline 接进 Claude Code 的 statusLine（只改这一个键，改前备份，off 恢复原样）
+          case "${2:-status}" in
+            on)  $APP --quota install;;
+            off) $APP --quota uninstall;;
+            *)   $APP --quota status;;
+          esac;;
   report) python3 "$(dirname "$0")/report.py";;
   status) if [ -n "$PID" ]; then
             echo "运行中 pid=$PID"
             echo "最近状态（phase,tool,会话数,覆盖率,渲染,可见性,真实帧率）："
             tail -3 diag.csv | cut -d, -f2,3,4,6,7,12,13 | sed 's/^/  /'
           else echo "未运行"; fi;;
-  *) echo "用法: ./ld {start|next|demo|hud|autostart|report|pause|stop|status}";;
+  *) echo "用法: ./ld {start|next|demo|celebrate|hud|widget|fx|model|skin|settings|autostart|quota|report|pause|stop|status}";;
 esac

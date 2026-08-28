@@ -9,3 +9,7 @@ code/spike/status.log
 
 .DS_Store
 docs/archive/
+
+# 工具残留（Playwright MCP 截图、Python 字节码）
+.playwright-mcp/
+__pycache__/
