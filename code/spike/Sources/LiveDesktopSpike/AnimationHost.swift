@@ -135,7 +135,7 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
         let readme = userSkinsDir.appendingPathComponent("README.md")
         if !fm.fileExists(atPath: readme.path) {
             try? """
-            # live-desktop 自定义皮肤
+            # AIDeck 自定义皮肤
 
             把任意自包含的 `*.html` 放在这个目录，它就会出现在皮肤列表里（名字前缀 `user/`）。
             最快的起点：在设置页点「新建皮肤（从模板）」，会复制一份内置皮肤到这里。

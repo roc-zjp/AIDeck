@@ -39,14 +39,14 @@ final class ModelServer: NSObject, WKURLSchemeHandler {
         let readme = userModelsDir.appendingPathComponent("README.md")
         if !fm.fileExists(atPath: readme.path) {
             try? """
-            # live-desktop 自定义 3D 模型
+            # AIDeck 自定义 3D 模型
 
             把 `.glb` / `.gltf` / `.fbx` 放在这个目录，它就会出现在设置页「3D 模型」的列表里（名字前缀 `user/`），
             也可以 `./ld model user/<文件名>` 选中。hologram 皮肤会把它作为全息投影台上的主体。
 
             **带骨骼动画的角色会动**：动作片段按 Claude 状态挑（多段时按名字关键词：idle / wave / dance…，单段就一直放），
             播放速度随活跃度——待机慢放、执行工具全速。想要会跳舞的角色：去 mixamo.com 挑一个角色 + 一段动作，
-            导出 **FBX Binary（With Skin）**，把文件直接放进来即可。Mixamo 资产是给你自己用的，不要随 live-desktop 一起分发。
+            导出 **FBX Binary（With Skin）**，把文件直接放进来即可。Mixamo 资产是给你自己用的，不要随 AIDeck 一起分发。
 
             渲染是全息风格：单色、菲涅尔边缘光、扫描线、线框——材质与贴图会被忽略，只用几何与骨骼。
             模型会自动居中缩放、脚底落在投影台上，不用在建模软件里调尺寸。

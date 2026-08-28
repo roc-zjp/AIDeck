@@ -605,7 +605,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         b.image = img
         b.imagePosition = .imageOnly
         b.title = ""
-        b.toolTip = "live-desktop · \(waiting > 0 ? "\(waiting) 个会话等你输入" : "Claude Code 状态")"
+        b.toolTip = "AIDeck · \(waiting > 0 ? "\(waiting) 个会话等你输入" : "Claude Code 状态")"
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {

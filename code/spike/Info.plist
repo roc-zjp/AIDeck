@@ -6,7 +6,8 @@
     <key>CFBundleExecutable</key><string>LiveDesktopSpike</string>
     <key>CFBundleIdentifier</key><string>com.zhoujunpeng.livedesktop</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-    <key>CFBundleName</key><string>LiveDesktopSpike</string>
+    <key>CFBundleName</key><string>AIDeck</string>
+    <key>CFBundleDisplayName</key><string>AIDeck</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.2</string>
     <key>CFBundleVersion</key><string>1</string>

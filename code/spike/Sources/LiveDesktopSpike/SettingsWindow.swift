@@ -30,7 +30,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1020, height: 560),
                            styleMask: [.titled, .closable, .miniaturizable],
                            backing: .buffered, defer: false)
-        win.title = "live-desktop 设置"
+        win.title = "AIDeck 设置"
         super.init(window: win)
         win.delegate = self
         buildUI()

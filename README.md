@@ -1,9 +1,9 @@
-# live-desktop
+# AIDeck
 
-常驻 macOS 的 **Claude Code 状态感知台**：桌面是贾维斯式全息工作台，菜单栏是常驻哨兵，通知是长尾兜底。
+常驻 macOS 的 **AI agent 桌面**（首个接入的 agent 是 Claude Code）：桌面是贾维斯式全息工作台，菜单栏是常驻哨兵，通知是长尾兜底。
 不切回终端也知道哪个会话在跑、哪个在等你、额度还剩多少。
 
-> 内部代号 JARVIS（漫威商标，不作产品名）｜ 阶段：自用验证中
+> 产品名 **AIDeck**（定位：AI agent 桌面）｜ JARVIS 仅作全息主形态内部代号｜ 阶段：自用验证中
 
 - **接手先读 [`HANDOFF.md`](HANDOFF.md)**，再读 [`docs/spec.md`](docs/spec.md)
 - 动手前必读 [`docs/issues.md`](docs/issues.md)（5 条静默失败型的坑）
