@@ -12,11 +12,18 @@ final class GitProbe {
     private let queue = DispatchQueue(label: "com.zhoujunpeng.livedesktop.gitprobe", qos: .utility)
     private let lock = NSLock()
 
-    /// 返回已有缓存，过期的目录丢到后台刷新（下一拍拿到新值）
+    /// 返回已有缓存，过期的目录丢到后台刷新（下一拍拿到新值）。
+    /// 不再活跃的目录顺手从三份缓存里清掉（正在刷新的除外，等它回来自己落缓存后下一拍再清）——以前只增不减
     func snapshot(_ cwds: [String]) -> [String: Repo] {
         var out: [String: Repo] = [:]
         let now = Date()
-        for cwd in Set(cwds) {
+        let live = Set(cwds)
+        lock.lock()
+        for k in cache.keys where !live.contains(k) && !refreshing.contains(k) {
+            cache.removeValue(forKey: k); lastHead.removeValue(forKey: k); commitAt.removeValue(forKey: k)
+        }
+        lock.unlock()
+        for cwd in live {
             lock.lock()
             let entry = cache[cwd]
             let needs = (entry == nil || now.timeIntervalSince(entry!.at) > 10) && !refreshing.contains(cwd)
@@ -48,15 +55,32 @@ final class GitProbe {
         lock.unlock()
     }
 
+    /// 单次 git 调用的上限。刷新跑在串行队列上，一个卡住的 git（网络盘 / 巨型仓库 / 别的进程握着锁）
+    /// 以前会永久堵死所有仓库的刷新，且该目录留在 refreshing 里再也不更新
+    private static let timeout: TimeInterval = 8
+
     private func run(_ args: [String], cwd: String) -> String? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         p.arguments = ["-C", cwd, "--no-optional-locks"] + args
         let out = Pipe()
         p.standardOutput = out
-        p.standardError = Pipe()
+        p.standardError = FileHandle.nullDevice     // 不读的管道写满 64KB 会把 git 卡死，直接丢弃
         do { try p.run() } catch { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
+        // 在别的线程读到 EOF；超时就杀掉 git，读线程随管道关闭自然结束
+        var data = Data()
+        let done = DispatchGroup()
+        done.enter()
+        DispatchQueue.global(qos: .utility).async {
+            data = out.fileHandleForReading.readDataToEndOfFile()
+            done.leave()
+        }
+        if done.wait(timeout: .now() + Self.timeout) == .timedOut {
+            p.terminate()
+            _ = done.wait(timeout: .now() + 2)
+            FileHandle.standardError.write("[git] \(cwd) 上 git \(args.first ?? "") 超过 \(Int(Self.timeout))s 未返回，已放弃\n".data(using: .utf8)!)
+            return nil
+        }
         p.waitUntilExit()
         guard p.terminationStatus == 0 else { return nil }
         let s = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)

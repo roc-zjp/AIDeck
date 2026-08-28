@@ -202,15 +202,38 @@ enum QuotaInstaller {
     /// statusLine 的值：平对象（不含嵌套花括号）或 JSON 字符串
     private static let statusLinePattern = #""statusLine"\s*:\s*(\{[^{}]*\}|"(?:[^"\\]|\\.)*")"#
 
-    /// 返回 [String: Any]（对象写法）、String（字符串写法）或 nil（没配）
+    /// 返回 [String: Any]（对象写法）、String（字符串写法）或 nil（没配）。
+    ///
+    /// 正则只认「平对象 / 字符串」两种写法；command 里含花括号（jq 过滤器很常见）或值是嵌套对象时会失配。
+    /// 失配以前被当成「没配」走插入分支，用户文件里就会出现**两个 statusLine 键**（2026-08-28 审计发现）。
+    /// 所以先把整份文件按 JSON 解析核对：键在而正则找不到 → 拒绝改；正则找到的值与 JSON 解析结果对不上 → 拒绝改。
+    /// 这是全项目唯一写用户配置的地方，宁可不改，不能改错
     static func currentStatusLine(in text: String) throws -> Any? {
-        guard let r = text.range(of: statusLinePattern, options: .regularExpression) else { return nil }
+        var expected: Any?     // 整份 JSON 解析出的 statusLine 值（NSNull 表示键在但为 null）
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            guard let root = try? JSONSerialization.jsonObject(with: Data(trimmed.utf8)) as? [String: Any] else {
+                throw Failure(description: "settings.json 不是合法的 JSON 对象，为安全起见不做修改")
+            }
+            expected = root["statusLine"]
+        }
+        guard let r = text.range(of: statusLinePattern, options: .regularExpression) else {
+            if expected != nil {
+                throw Failure(description: "settings.json 里的 statusLine 写法超出本工具能安全改写的范围（command 含花括号或值是嵌套对象），"
+                              + "为安全起见不做修改；请先把它简化为 {\"type\":\"command\",\"command\":\"<脚本路径>\"} 再重试")
+            }
+            return nil
+        }
         let m = String(text[r])
         guard let colon = m.firstIndex(of: ":") else { return nil }
         let value = m[m.index(after: colon)...].trimmingCharacters(in: .whitespaces)
         // 用数组包一层交给 JSONSerialization，对象和字符串两种值都能解析
         guard let arr = try? JSONSerialization.jsonObject(with: Data("[\(value)]".utf8)) as? [Any], let v = arr.first
         else { throw Failure(description: "settings.json 里的 statusLine 无法解析，为安全起见不做修改") }
+        // 正则命中的必须就是 JSON 里那个键（别的字符串值里恰好出现 "statusLine": {...} 字样时会命中错位置）
+        if let e = expected, command(of: e) != command(of: v) {
+            throw Failure(description: "settings.json 里 statusLine 的位置无法可靠定位，为安全起见不做修改")
+        }
         return v
     }
 
@@ -237,8 +260,8 @@ enum QuotaInstaller {
     }
 
     static func removingStatusLine(in text: String) throws -> String {
-        // 先试"前面带逗号"（它不是第一个键），再试"后面带逗号"（它是第一个键），最后裸删
-        for p in [",\\s*" + statusLinePattern, statusLinePattern + "\\s*,", statusLinePattern] {
+        // 先试"前面带逗号"（它不是第一个键），再试"后面带逗号"（它是第一个键，连同前面的换行缩进一起删，否则留一个空行），最后裸删
+        for p in [",\\s*" + statusLinePattern, "\\s*" + statusLinePattern + "\\s*,", "\\s*" + statusLinePattern + "\\s*"] {
             if let r = text.range(of: p, options: .regularExpression) {
                 return text.replacingCharacters(in: r, with: "")
             }

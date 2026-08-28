@@ -109,6 +109,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NotificationCenter.default.addObserver(
             self, selector: #selector(screenParametersDidChange),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        // 系统休眠唤醒：FSEvents 长睡后可能丢事件、WebContent 可能已被回收、屏幕排列可能变了——醒来立刻全量对账一次，
+        // 不等 30s 的定期自愈。（快速用户切换 / 息屏不用通知：闸门里每拍现查，见 tick）
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(systemDidWake), name: NSWorkspace.didWakeNotification, object: nil)
 
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.tick()
@@ -157,6 +161,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
         }
+    }
+
+    // MARK: - 休眠唤醒 / 退出
+
+    @objc private func systemDidWake() {
+        FileHandle.standardError.write("[power] 系统唤醒：强制对账一次\n".data(using: .utf8)!)
+        probe.requestHeal()                                   // 下一拍全量 mtime 对账 + 注册表重读
+        screenParametersDidChange()                           // 屏幕集合 / 排列可能在睡眠期间变了（合并防抖后处理）
+        units.forEach { $0.host.setRendering($0.rendering) }  // 把渲染开关再推一次：页面若在睡眠期被重建，靠 ready 补推；没重建的也无害
+        tick()
+    }
+
+    /// 注销 / 关机 / 菜单退出：把该关的关掉。以前没有这一步，diag.csv 最后一行可能被截断，WebContent 全靠系统回收
+    func applicationWillTerminate(_ n: Notification) {
+        try? diagHandle?.close()
+        diagHandle = nil
+        units.forEach { $0.tearDown() }
+        units.removeAll()
+    }
+
+    /// 快速用户切换到别的账户后，我们的窗口留在后台登录会话里，occlusionState 未必判不可见——按 CGSession 的 on-console 位兜底。
+    /// 读不到字典（极少见）当在前台，宁可多渲染也别把桌面搞黑
+    private static var sessionOnConsole: Bool {
+        guard let d = CGSessionCopyCurrentDictionary() as? [String: Any] else { return true }
+        return (d[kCGSessionOnConsoleKey as String] as? Bool) ?? true
     }
 
     // MARK: - 屏幕变化
@@ -237,7 +266,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// 自由坐标只对主屏生效，其余屏回落到 anchor
     private var programmaticMove = false
-    private var saveTimer: Timer?
     private var dragTimer: Timer?
     private var wasPressed = false
     private var dragOffset: CGSize?
@@ -471,17 +499,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         coverageMillis = Date().timeIntervalSince(t0) * 1000
         lastCoverage = cov.max() ?? 0
 
+        let onConsole = Self.sessionOnConsole
         for (i, unit) in units.enumerated() {
             unit.host.push(state: state)
             pushHudState(to: unit)
             let occluded = !unit.window.occlusionState.contains(.visible)
             if i == 0 { lastOccluded = occluded }
             let coverage = i < cov.count ? cov[i] : 0
-            // 三道闸门：手动暂停 > AppKit 遮挡判定 > 几何覆盖率兜底
+            // 该屏是否已息屏（屏保 / 节能 / 合盖）。WebKit 自己也会停 rAF（实测 0fps），这里是宿主侧的明确闸门
+            let displayAsleep = CGDisplayIsAsleep(unit.displayID) != 0
+            // 闸门：手动暂停 > AppKit 遮挡判定 > 几何覆盖率兜底 > 不在前台登录会话 / 息屏
             let shouldRender: Bool
             if forceRender      { shouldRender = true }
             else if forcePause  { shouldRender = false }
-            else                { shouldRender = !manuallyPaused && !occluded && coverage < 0.98 }
+            else                { shouldRender = !manuallyPaused && !occluded && coverage < 0.98 && onConsole && !displayAsleep }
             if shouldRender != unit.rendering {
                 unit.rendering = shouldRender
                 unit.host.setRendering(shouldRender)
@@ -776,20 +807,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - 诊断日志
 
+    // diag.csv 每秒一行、约 5.7 MB/天，是 P0 判据（./ld report）的唯一数据源：不能清空（重启 / launchd 拉起都要追加），
+    // 也不能无限长（2026-08-28 已 12.5 MB，一年 2 GB）。按**本地日期**轮转：当前文件永远叫 diag.csv（report.py 与老习惯不变），
+    // 跨天时改名为 diag-<最后一行的日期>.csv 归档，只保留最近 diagRetentionDays 天；report.py 会把归档一起读。
+    // 写入用会抛 Swift 错误的 write(contentsOf:)：老的 write(_:) 在磁盘满时抛 ObjC 异常，Swift 接不住、进程直接崩
+    private static let diagRetentionDays = 30
+    private static let diagHeader = "ts,phase,tool,sessions,occluded,coverage,rendering,fps,probeMs,coverageMs,battery,vis,realFps\n"
+    private static let dayFormatter: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.locale = Locale(identifier: "en_US_POSIX"); return f
+    }()
+    private var diagDay = ""                                   // 当前 diag.csv 对应的本地日期
+    private var diagDir: String { FileManager.default.currentDirectoryPath }
+    private var diagPath: String { diagDir + "/diag.csv" }
+
     private func openDiagLog() {
-        let path = FileManager.default.currentDirectoryPath + "/diag.csv"
-        // 只在文件不存在时写表头。diag.csv 是 P0 判据的唯一数据源，
-        // 重启（含 launchd 保活拉起）不能清空它 —— 之前 createFile 每次都覆盖，下面的 seekToEnd 形同虚设
-        if !FileManager.default.fileExists(atPath: path) {
-            FileManager.default.createFile(atPath: path, contents:
-                "ts,phase,tool,sessions,occluded,coverage,rendering,fps,probeMs,coverageMs,battery,vis,realFps\n".data(using: .utf8))
+        let fm = FileManager.default
+        let today = Self.dayFormatter.string(from: Date())
+        // 上次运行留下的文件若属于更早的日期（mtime = 最后一行写入的那天），先归档再开新的
+        if fm.fileExists(atPath: diagPath),
+           let m = (try? fm.attributesOfItem(atPath: diagPath))?[.modificationDate] as? Date {
+            let day = Self.dayFormatter.string(from: m)
+            if day != today { archiveDiag(as: day) }
         }
-        diagHandle = FileHandle(forWritingAtPath: path)
-        diagHandle?.seekToEndOfFile()
-        FileHandle.standardError.write("[diag] 写入 \(path)\n".data(using: .utf8)!)
+        if !fm.fileExists(atPath: diagPath) {
+            fm.createFile(atPath: diagPath, contents: Self.diagHeader.data(using: .utf8))
+        }
+        diagHandle = FileHandle(forWritingAtPath: diagPath)
+        diagDay = today
+        if let h = diagHandle {
+            _ = try? h.seekToEnd()
+            FileHandle.standardError.write("[diag] 写入 \(diagPath)\n".data(using: .utf8)!)
+        } else {
+            // 以前这里静默：cwd 不可写（如双击 .app 时 cwd=/）诊断就悄悄没了
+            FileHandle.standardError.write("[diag] 打不开 \(diagPath)（目录不可写？），诊断日志停用\n".data(using: .utf8)!)
+        }
+        pruneDiagArchives()
+    }
+
+    /// diag.csv → diag-<day>.csv；同名已存在就加序号，绝不覆盖
+    private func archiveDiag(as day: String) {
+        let fm = FileManager.default
+        var dst = diagDir + "/diag-\(day).csv"
+        var n = 1
+        while fm.fileExists(atPath: dst) { dst = diagDir + "/diag-\(day)-\(n).csv"; n += 1 }
+        do {
+            try fm.moveItem(atPath: diagPath, toPath: dst)
+            FileHandle.standardError.write("[diag] 已归档 \(dst)\n".data(using: .utf8)!)
+        } catch {
+            FileHandle.standardError.write("[diag] 归档失败：\(error.localizedDescription)\n".data(using: .utf8)!)
+        }
+    }
+
+    /// 删掉超过保留期的归档。文件名里的 yyyy-MM-dd 字典序即时间序
+    private func pruneDiagArchives() {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: diagDir) else { return }
+        let cutoff = Self.dayFormatter.string(from: Date(timeIntervalSinceNow: -Double(Self.diagRetentionDays) * 86400))
+        for n in names where n.hasPrefix("diag-") && n.hasSuffix(".csv") {
+            let day = String(n.dropFirst("diag-".count).prefix(10))
+            if day < cutoff { try? fm.removeItem(atPath: diagDir + "/" + n) }
+        }
     }
 
     private func writeDiagLine() {
+        guard diagHandle != nil else { return }
+        let today = Self.dayFormatter.string(from: Date())
+        if today != diagDay {                                  // 跨天：关掉、归档昨天的、开今天的
+            try? diagHandle?.close()
+            diagHandle = nil
+            archiveDiag(as: diagDay)
+            openDiagLog()
+            guard diagHandle != nil else { return }
+        }
         let line = String(format: "%@,%@,%@,%d,%d,%.3f,%d,%.0f,%.2f,%.2f,%d,%@,%d\n",
                           ISO8601DateFormatter().string(from: Date()),
                           state.phase.rawValue, state.tool ?? "", state.sessions.count,
@@ -798,7 +887,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                           units.first?.host.reportedFPS ?? 0,
                           state.probeMillis, coverageMillis, onBattery ? 1 : 0,
                           lastVis, max(0, lastFrames - prevFrames))
-        diagHandle?.write(line.data(using: .utf8)!)
+        do {
+            try diagHandle?.write(contentsOf: line.data(using: .utf8)!)
+        } catch {
+            // 磁盘满 / 文件被挪走：停掉诊断，主功能不受影响，也不再每秒重试
+            FileHandle.standardError.write("[diag] 写入失败（\(error.localizedDescription)），诊断日志停用\n".data(using: .utf8)!)
+            try? diagHandle?.close()
+            diagHandle = nil
+        }
     }
 }
 
@@ -817,8 +913,12 @@ if CommandLine.arguments.contains("--probe-once") {
     // 系统资源采两拍（隔 1s）：CPU / 磁盘吞吐是差分量，单拍只有 null
     let sys = SystemProbe(); sys.sample(&st); Thread.sleep(forTimeInterval: 1); sys.sample(&st)
     let obj = st.jsonObject
-    let data = try! JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
-    print(String(data: data, encoding: .utf8)!)
+    guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
+          let text = String(data: data, encoding: .utf8) else {
+        FileHandle.standardError.write("状态序列化失败：某个数值字段是 NaN / Inf（键：\(obj.keys.sorted().joined(separator: ",")))\n".data(using: .utf8)!)
+        exit(1)
+    }
+    print(text)
     exit(0)
 }
 

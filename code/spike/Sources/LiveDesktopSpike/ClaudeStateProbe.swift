@@ -117,6 +117,10 @@ final class ClaudeStateProbe {
     private var tailCache: [String: CachedTranscript] = [:]
     private var ctxCache: [String: Double] = [:]
     private var tickCount = 0
+    private var healRequested = false
+
+    /// 让下一拍走全量对账（系统唤醒后 FSEvents 可能丢了一段事件，不等 30s 周期）
+    func requestHeal() { healRequested = true }
 
     init() {
         registryAvailable = FileManager.default.fileExists(atPath: sessionsDir.path)
@@ -168,7 +172,8 @@ final class ClaudeStateProbe {
         tickCount += 1
 
         // 自愈对账：FSEvents 可能丢事件、ctx 目录可能后建。没有 watcher 时每拍都走这条路，行为与旧版一致
-        let heal = watcher == nil || tickCount % 30 == 0
+        let heal = watcher == nil || tickCount % 30 == 0 || healRequested
+        healRequested = false
 
         // 注册表目录可能后建（旧版升级 / 新装后的首个会话）：对账拍复查，出现即切回注册表模式
         if heal, !registryAvailable, FileManager.default.fileExists(atPath: sessionsDir.path) {
@@ -190,6 +195,7 @@ final class ClaudeStateProbe {
         // 会话没了（注册表移除 / 进程死了 / 超窗）就清缓存
         tailCache = tailCache.filter { liveIds.contains($0.key) }
         ctxCache = ctxCache.filter { liveIds.contains($0.key) }
+        transcriptCache = transcriptCache.filter { liveIds.contains($0.key) }   // 以前漏了它：每个见过的会话永久留一条
 
         // 活跃项目的 git 状态：按会话启动目录去重，GitProbe 后台刷新缓存
         let repos = git.snapshot(cwds)

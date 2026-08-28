@@ -176,7 +176,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             modelRow.addArrangedSubview(b)
         }
         controls.addArrangedSubview(modelRow)
-        controls.addArrangedSubview(label("把 .glb 放进模型目录即可选；全息风格只用几何，材质贴图忽略；Draco 压缩不支持",
+        controls.addArrangedSubview(label("把 .glb / .gltf / .fbx 放进模型目录即可选（glTF 含 Draco 压缩也行）；全息风格只用几何，材质贴图忽略",
                                           size: 11, color: .secondaryLabelColor))
 
         // 小工具槽位：装配台就在左侧真实预览上（overlay），这里只放引导说明

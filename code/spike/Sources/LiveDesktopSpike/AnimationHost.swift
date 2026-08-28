@@ -74,10 +74,53 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
         let dir = name.hasPrefix(Self.userPrefix) ? Self.userSkinsDir : webDirectory
         let file = name.hasPrefix(Self.userPrefix) ? String(name.dropFirst(Self.userPrefix.count)) : name
         let url = dir.appendingPathComponent(file)
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            Self.log("[webkit] 皮肤文件不存在：\(url.path)，保持当前页面")
+            return
+        }
         ready = false
         currentAnimation = name
         webView.loadFileURL(url, allowingReadAccessTo: dir)
+    }
+
+    static func log(_ s: String) {
+        FileHandle.standardError.write((s + "\n").data(using: .utf8)!)
+    }
+
+    // MARK: - 自愈：WebContent 进程没了不会自己回来
+
+    /// WebContent 被系统杀掉（内存压力 / 长时间休眠后回收）时页面停在最后一帧或整块透明，不重载就是**永久黑屏**——
+    /// 对常驻应用这是最致命的一类失败。重载走 load() 同一条路，pendingState / pendingConfig / pendingRunning 在 ready 时补推，状态不丢。
+    /// 连续崩溃按 2^n 秒退避（上限 60s）：一个必崩的皮肤不能变成重载风暴
+    private var crashCount = 0
+    private var lastCrashAt = Date.distantPast
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        let now = Date()
+        if now.timeIntervalSince(lastCrashAt) > 120 { crashCount = 0 }   // 两分钟没再崩就当新一轮
+        crashCount += 1
+        lastCrashAt = now
+        ready = false
+        reportedFPS = 0
+        let delay = min(60.0, pow(2.0, Double(crashCount - 1)))
+        let name = currentAnimation
+        Self.log("[webkit] WebContent 进程终止（皮肤 \(name)，连续第 \(crashCount) 次），\(Int(delay))s 后重载")
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            // 期间用户换了皮肤 / 宿主已下线，load 已经或不再需要重建页面
+            guard let self, self.webView.navigationDelegate != nil, self.currentAnimation == name else { return }
+            self.load(name)
+        }
+    }
+
+    /// 加载失败不能静默：用户自定义皮肤路径 / 权限出问题时桌面是黑的，日志里至少要有一行
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        if (error as NSError).code == NSURLErrorCancelled { return }   // 快速连切皮肤时上一次加载被取消，正常
+        Self.log("[webkit] 皮肤 \(currentAnimation) 加载失败：\(error.localizedDescription)")
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        if (error as NSError).code == NSURLErrorCancelled { return }
+        Self.log("[webkit] 皮肤 \(currentAnimation) 导航出错：\(error.localizedDescription)")
     }
 
     /// 建好自定义皮肤目录，把运行时（ld.js / ld-widgets.js）同步进去，首次生成契约说明。
@@ -164,9 +207,20 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
     }
 
     private func pushConfigRaw(_ cfg: [String: Any]) {
-        guard let d = try? JSONSerialization.data(withJSONObject: cfg),
-              let s = String(data: d, encoding: .utf8) else { return }
+        guard let s = serialize(cfg, what: "setConfig") else { return }
         webView.evaluateJavaScript("window.__ld && window.__ld.setConfig(\(s));")
+    }
+
+    /// 序列化失败（NaN / Inf 混进了某个数值字段）以前是静默 no-op——页面从此再收不到更新、动画停在旧状态且零日志。
+    /// 现在至少喊一声（每种推送只喊一次，别每秒刷屏）
+    private var loggedSerializeFailure: Set<String> = []
+    private func serialize(_ obj: [String: Any], what: String) -> String? {
+        if let d = try? JSONSerialization.data(withJSONObject: obj), let s = String(data: d, encoding: .utf8) { return s }
+        if !loggedSerializeFailure.contains(what) {
+            loggedSerializeFailure.insert(what)
+            Self.log("[webkit] \(what) 序列化失败（数值字段含 NaN/Inf？），本次推送被丢弃：\(obj.keys.sorted().joined(separator: ","))")
+        }
+        return nil
     }
 
     /// 异步取页面自检数据（可见性/累计帧数），用于持续记录真实帧率
@@ -223,8 +277,7 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
     }
 
     private func pushRaw(_ obj: [String: Any]) {
-        guard let d = try? JSONSerialization.data(withJSONObject: obj),
-              let s = String(data: d, encoding: .utf8) else { return }
+        guard let s = serialize(obj, what: "setState") else { return }
         webView.evaluateJavaScript("window.__ld && window.__ld.setState(\(s));")
     }
 
