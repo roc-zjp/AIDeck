@@ -142,6 +142,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         tick()
 
+        // 首启引导：第一次运行弹一次欢迎面板（介绍入口 + 通知授权）。老用户升级也会看到一次，无妨
+        if !UserDefaults.standard.bool(forKey: "didLaunchBefore") {
+            UserDefaults.standard.set(true, forKey: "didLaunchBefore")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.showWelcome() }
+        }
+
         if CommandLine.arguments.contains("--selftest") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 9) { [weak self] in
                 guard let u = self?.units.first else { return }
@@ -723,6 +729,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let settingsItem = NSMenuItem(title: "设置…", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
+        let helpItem = NSMenuItem(title: "使用说明…", action: #selector(showWelcome), keyEquivalent: "")
+        helpItem.target = self
+        menu.addItem(helpItem)
         let pause = NSMenuItem(title: manuallyPaused ? "恢复动画" : "暂停动画",
                                action: #selector(togglePause), keyEquivalent: "")
         pause.target = self
@@ -759,6 +768,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settings: SettingsWindowController?
     var currentAnimation: String { animation }
     var alertEngine: AlertEngine { alerts }     // 设置页显示 / 刷新系统通知授权状态
+    private var welcome: WelcomeWindowController?
+
+    /// 首启引导 / 使用说明（P2）：菜单「使用说明…」也走这里
+    @objc func showWelcome() {
+        if welcome == nil { welcome = WelcomeWindowController(app: self) }
+        welcome?.showWindow(nil)
+        welcome?.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
     @objc func openSettings() {
         if settings == nil { settings = SettingsWindowController(app: self) }

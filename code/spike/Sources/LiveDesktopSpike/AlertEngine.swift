@@ -24,7 +24,7 @@ final class AlertEngine: NSObject, UNUserNotificationCenterDelegate {
         guard hasBundle else { return }     // 裸二进制（开发态/CLI）没有通知能力，UNUserNotificationCenter 会直接崩
         let center = UNUserNotificationCenter.current()
         center.delegate = self
-        requestAuthorization()
+        refreshAuthorizationStatus()   // 只读当前授权状态，不弹框；首次授权改由欢迎窗口 / 设置页主动触发（P2：不在启动瞬间打扰）
     }
 
     /// 向系统申请授权（只有 notDetermined 时系统才会真的弹框；已拒绝的只能去系统设置改）
