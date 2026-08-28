@@ -616,6 +616,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var head = "Claude：\(phaseLabel[state.phase] ?? "?")"
         if let t = state.tool { head += " · \(t)" }
         if let p = state.name ?? state.project { head += " · \(p)" }
+        if !state.claudeDetected && state.sessions.isEmpty { head = "未检测到 Claude Code 会话记录（~/.claude 下没有 sessions / projects）" }
         menu.addItem(NSMenuItem(title: head, action: nil, keyEquivalent: ""))
         // 第二行把菜单栏图标旁那个数字解释清楚：它就是等你输入的会话数
         let waitingCount = state.sessions.filter { $0.phase == .waiting }.count
@@ -757,6 +758,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var settings: SettingsWindowController?
     var currentAnimation: String { animation }
+    var alertEngine: AlertEngine { alerts }     // 设置页显示 / 刷新系统通知授权状态
 
     @objc func openSettings() {
         if settings == nil { settings = SettingsWindowController(app: self) }

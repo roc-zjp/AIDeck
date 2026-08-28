@@ -55,9 +55,12 @@ struct ClaudeState {
     var quota: QuotaSnapshot?           // 五小时 / 七天额度（来自 statusline 记录，可能为空）
     var system: SystemSnapshot?         // 整机 CPU / GPU / 内存 / 磁盘 + Claude 进程树占比（SystemProbe 每拍写入）
     var probeMillis: Double = 0   // 本轮探测耗时，用于评估轮询开销
+    var claudeDetected = true     // ~/.claude 下有会话注册表或项目记录。false = 没装 / 从没跑过 Claude Code，
+                                  // 状态卡要说清楚，不能和「真空闲」显示成一样
 
     var jsonObject: [String: Any] {
         [
+            "claudeDetected": claudeDetected,
             "phase": phase.rawValue,
             "tool": tool as Any,
             "project": project as Any,
@@ -184,6 +187,7 @@ final class ClaudeStateProbe {
         }
         let dirty = dirtyTranscripts
         dirtyTranscripts.removeAll()
+        state.claudeDetected = registryAvailable || FileManager.default.fileExists(atPath: projectsDir.path)
 
         let liveIds: Set<String>
         let cwds: [String]

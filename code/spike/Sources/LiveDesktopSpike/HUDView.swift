@@ -163,7 +163,8 @@ final class HUDView: NSView {
         dotLayer.shadowOpacity = 0.9
         dotLayer.shadowRadius = 6
         dotLayer.shadowOffset = .zero
-        if sorted.isEmpty { headLabel.stringValue = "空闲 · 无活跃会话" }
+        // 「真空闲」与「根本没装 / 没跑过 Claude Code」以前显示成一样，新用户会以为它坏了
+        if sorted.isEmpty { headLabel.stringValue = state.claudeDetected ? "空闲 · 无活跃会话" : "未检测到 Claude Code 会话记录" }
         else {
             var parts: [String] = []
             if waiting > 0 { parts.append("\(waiting) 个等你输入") }

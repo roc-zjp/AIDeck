@@ -11,6 +11,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var skinPrefsBox: NSStackView!
     private var quotaStatusLabel: NSTextField!
     private var quotaActionButton: NSButton!
+    private var notifStatusLabel: NSTextField!
+    private var notifActionButton: NSButton!
     private var quotaInstalled = false
     private var quotaTick = 0
     private var previewSizeConstraints: (w: NSLayoutConstraint, h: NSLayoutConstraint)?
@@ -43,6 +45,43 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         widgetOverlay?.state = state      // 装配台卡片缩略图用真实数据
         quotaTick += 1
         if quotaTick % 5 == 1 { refreshQuotaSection() }   // 5s 一刷：够跟上数据，又不必每秒读 settings.json
+        if quotaTick % 5 == 3 { app?.alertEngine.refreshAuthorizationStatus { [weak self] in self?.refreshNotificationRow() } }  // 用户可能刚在系统设置里改了
+    }
+
+    /// 系统通知授权状态行：已允许 / 已拒绝（给「打开系统设置」）/ 尚未决定（给「请求授权」）
+    private func refreshNotificationRow() {
+        guard let engine = app?.alertEngine, notifStatusLabel != nil else { return }
+        guard engine.hasBundle else {
+            notifStatusLabel.stringValue = "系统通知：裸二进制无通知能力（用 build.sh 组的 .app 运行才有）"
+            notifActionButton.isHidden = true
+            return
+        }
+        switch engine.authorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            notifStatusLabel.stringValue = "系统通知权限：已允许"
+            notifStatusLabel.textColor = .secondaryLabelColor
+            notifActionButton.isHidden = true
+        case .denied:
+            notifStatusLabel.stringValue = "系统通知权限：已拒绝——上面的勾选无效，一条都不会送达"
+            notifStatusLabel.textColor = .systemOrange
+            notifActionButton.title = "打开系统设置"
+            notifActionButton.isHidden = false
+        default:
+            notifStatusLabel.stringValue = "系统通知权限：尚未授权"
+            notifStatusLabel.textColor = .systemOrange
+            notifActionButton.title = "请求授权"
+            notifActionButton.isHidden = false
+        }
+    }
+
+    @objc private func notifAction() {
+        guard let engine = app?.alertEngine else { return }
+        if engine.authorizationStatus == .denied {
+            // 通知设置页；系统会定位到本 App 需要用户再点一下
+            if let u = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") { NSWorkspace.shared.open(u) }
+        } else {
+            engine.requestAuthorization { [weak self] in self?.refreshNotificationRow() }
+        }
     }
     func pushConfig() {
         previewHost.pushConfig(Prefs.config(skin: app?.currentAnimation ?? ""))
@@ -244,6 +283,19 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         alertsCb.state = Prefs.alertsEnabled ? .on : .off
         alertsCb.font = .systemFont(ofSize: 12)
         controls.addArrangedSubview(alertsCb)
+        // 系统层面的授权状态：用户在系统弹框点了「不允许」，上面的勾选框再亮也一条都收不到——必须说出来并给出口
+        let notifRow = NSStackView()
+        notifRow.orientation = .horizontal
+        notifRow.spacing = 8
+        notifStatusLabel = label("…", size: 11, color: .secondaryLabelColor)
+        notifActionButton = NSButton(title: "打开系统设置", target: self, action: #selector(notifAction))
+        notifActionButton.bezelStyle = .rounded
+        notifActionButton.controlSize = .small
+        notifActionButton.font = .systemFont(ofSize: 11)
+        notifRow.addArrangedSubview(notifStatusLabel)
+        notifRow.addArrangedSubview(notifActionButton)
+        controls.addArrangedSubview(notifRow)
+        refreshNotificationRow()
         let thRow = NSStackView()
         thRow.orientation = .horizontal
         thRow.spacing = 8

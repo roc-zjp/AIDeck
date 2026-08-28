@@ -12,7 +12,11 @@ final class AlertEngine: NSObject, UNUserNotificationCenterDelegate {
     private var quotaNotified: [String: Double] = [:]   // 窗口 key → 已通知的最高档
     private var authorized = false
     private var seeded = false                          // 首拍把已超阈值的等待标记为已通知
-    private let hasBundle = Bundle.main.bundleIdentifier != nil
+    let hasBundle = Bundle.main.bundleIdentifier != nil
+
+    /// 系统层面的通知授权状态（设置页据此提示）。以前用户一旦点了「不允许」，post() 就静默返回，
+    /// 而设置页的「阈值通知」勾选框还亮着——用户以为开着，其实永远收不到
+    private(set) var authorizationStatus: UNAuthorizationStatus = .notDetermined
 
     override init() {
         super.init()
@@ -20,8 +24,29 @@ final class AlertEngine: NSObject, UNUserNotificationCenterDelegate {
         guard hasBundle else { return }     // 裸二进制（开发态/CLI）没有通知能力，UNUserNotificationCenter 会直接崩
         let center = UNUserNotificationCenter.current()
         center.delegate = self
-        center.requestAuthorization(options: [.alert, .sound]) { [weak self] ok, _ in
-            DispatchQueue.main.async { self?.authorized = ok }
+        requestAuthorization()
+    }
+
+    /// 向系统申请授权（只有 notDetermined 时系统才会真的弹框；已拒绝的只能去系统设置改）
+    func requestAuthorization(_ done: (() -> Void)? = nil) {
+        guard hasBundle else { done?(); return }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] ok, _ in
+            DispatchQueue.main.async {
+                self?.authorized = ok
+                self?.refreshAuthorizationStatus(done)
+            }
+        }
+    }
+
+    /// 重新读一次系统授权状态（用户可能刚在系统设置里改过）
+    func refreshAuthorizationStatus(_ done: (() -> Void)? = nil) {
+        guard hasBundle else { done?(); return }
+        UNUserNotificationCenter.current().getNotificationSettings { [weak self] s in
+            DispatchQueue.main.async {
+                self?.authorizationStatus = s.authorizationStatus
+                self?.authorized = s.authorizationStatus == .authorized || s.authorizationStatus == .provisional
+                done?()
+            }
         }
     }
 
