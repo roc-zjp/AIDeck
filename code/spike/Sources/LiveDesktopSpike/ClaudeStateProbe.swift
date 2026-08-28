@@ -9,6 +9,13 @@ enum ClaudePhase: String {
     case running    // 正在执行工具
 }
 
+/// 精细「等你操作」原因（决策 009，来自 Notification hook）。注册表只给 busy / idle，
+/// 分不清「在跑工具」和「卡在确认框」；这个把后者从 busy 里拆出来
+enum AttentionKind: String {
+    case permission   // 权限确认框在等你点允许（已等约 6 秒才触发，秒过的不算）
+    case elicitation  // MCP 表单 / URL 在等你
+}
+
 struct SessionState {
     var id = ""               // 注册表 sessionId：AlertEngine 用它做「每次等待只通知一次」的身份
     var pid: Int32 = 0        // 会话进程：通知点击沿祖先链找终端 App
@@ -23,6 +30,7 @@ struct SessionState {
     var stalled = false       // 注册表说 busy，但太久没有任何输出：思考中 ≥10 分钟 / 执行工具 ≥30 分钟
     var parked = false        // 把作业转入了后台（parkedJobId 对应一个活着的 bg 会话）：本体不算停滞也不算在跑，
                               // 活儿由那个 bg 会话代表。实测"busy 挂 8.6 小时"的会话就是这种，不是僵尸
+    var attention: AttentionKind?   // 卡在确认框 / 表单在等你（Notification hook，决策 009）。非 nil 时 phase 归一为 waiting
     var contextPct: Double?   // 上下文占用百分比：Claude Code 自己算的（statusline 的 context_window，经 ld-statusline 按会话记录）
     var cpuPct: Double?       // 会话进程树（会话进程 + 全部后代）占全机 CPU 的百分比（SystemProbe 每拍写入；没有 pid 为 nil）
     var memBytes: UInt64?     // 会话进程树的 phys_footprint 之和（活动监视器「内存」列口径）
@@ -75,6 +83,7 @@ struct ClaudeState {
                  "kind": $0.kind, "branch": $0.branch as Any,
                  "phase": $0.phase.rawValue, "tool": $0.tool as Any,
                  "idleSeconds": $0.idleSeconds, "stalled": $0.stalled, "parked": $0.parked,
+                 "attention": $0.attention?.rawValue as Any,
                  "contextPct": $0.contextPct as Any,
                  "cpuPct": $0.cpuPct as Any, "memBytes": $0.memBytes as Any]
             },
@@ -106,6 +115,7 @@ final class ClaudeStateProbe {
     private var transcriptCache: [String: URL] = [:]   // sessionId → jsonl
     private let git = GitProbe()
     private var ctxDir: URL { QuotaProbe.dir.appendingPathComponent("ctx", isDirectory: true) }
+    private var hooksDir: URL { QuotaProbe.dir.appendingPathComponent("hooks", isDirectory: true) }
 
     // 事件驱动（2026-08-27）：贵的部分是每会话每秒读 96KB jsonl 尾 + JSON 解析（全量扫 22–28ms 且随活跃度波动），
     // 改为 FSEvents 报哪个文件变了才重读哪个，平时每拍纯内存组装。时间驱动的字段（idleSeconds / 停滞判定 /
@@ -266,13 +276,24 @@ final class ClaudeStateProbe {
             let parked = reg.parkedJobId.map { liveBgJobs.contains($0) } ?? false
             // 停滞判定：busy 但太久没有任何输出（含 subagent 侧链）。模型回复几分钟内必有落盘，
             // 工具（构建等）可以更久；超过阈值就不再冒充"在工作"
-            let stalled = !parked && busy && idle >= (phase == .running ? 1800 : 600)
+            var stalled = !parked && busy && idle >= (phase == .running ? 1800 : 600)
+            // 精细态：Notification hook 说这个会话卡在确认框 / 表单——球其实在你这边，别再冒充 running / thinking
+            var phaseOut = phase, toolOut = tool, idleOut = idle
+            var attention: AttentionKind?
+            if !parked, let att = readAttention(sessionId: reg.sessionId, jsonlMtime: mtime, busy: busy, now: now) {
+                attention = att.kind
+                phaseOut = .waiting
+                stalled = false
+                idleOut = max(0, Int(now.timeIntervalSince(att.at)))   // 从确认框弹出那刻算「等了多久」
+                toolOut = att.tool ?? tool
+            }
             state.sessions.append(SessionState(
                 id: reg.sessionId, pid: reg.pid,
                 project: project, name: reg.name,
                 nameIsUserSet: reg.nameSource != nil && reg.nameSource != "derived",
-                kind: reg.kind, branch: tail.branch, phase: phase, tool: tool,
-                idleSeconds: idle, stalled: stalled, parked: parked,
+                kind: reg.kind, branch: tail.branch, phase: phaseOut, tool: toolOut,
+                idleSeconds: idleOut, stalled: stalled, parked: parked,
+                attention: attention,
                 contextPct: ctxCache[reg.sessionId]))
         }
         return (liveIds, Array(Set(regs.map { $0.cwd })))
@@ -356,6 +377,26 @@ final class ClaudeStateProbe {
     }
 
     /// 本会话的上下文占用（ld-statusline 按会话记录；只在会话活跃时变化，活跃时恰好会刷新，不会过期）
+    private struct Attention { let kind: AttentionKind; let at: Date; let tool: String? }
+
+    /// 读 hooks/<sid>.json 得到「卡在确认框 / 表单」的精细态（决策 009）。清除靠推断，因为没有「框关闭」事件：
+    ///   · jsonl 前进到 at 之后（用户允许→工具结果落盘 / 拒绝→PermissionDenied 落盘）→ 已处理
+    ///   · 注册表 !busy（Claude 已不忙、框已消失）→ 已处理
+    ///   · 超过 30 分钟 → 兜底，防漏事件 / crash 残留一直卡着
+    /// 判定为已处理就顺手删文件。at 与 jsonl mtime 都是同机绝对墙钟时刻，可比（不涉及跨进程相对时间）
+    private func readAttention(sessionId: String, jsonlMtime: Date, busy: Bool, now: Date) -> Attention? {
+        let url = hooksDir.appendingPathComponent(sessionId + ".json")
+        guard let d = try? Data(contentsOf: url),
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              let type = o["type"] as? String,
+              let atEpoch = o["at"] as? Double else { return nil }
+        let at = Date(timeIntervalSince1970: atEpoch)
+        let handled = !busy || jsonlMtime.timeIntervalSince(at) > 2 || now.timeIntervalSince(at) > 1800
+        if handled { try? FileManager.default.removeItem(at: url); return nil }
+        return Attention(kind: type == "permission_prompt" ? .permission : .elicitation,
+                         at: at, tool: o["tool"] as? String)
+    }
+
     private func readContextPct(_ sessionId: String) -> Double? {
         guard let d = try? Data(contentsOf: ctxDir.appendingPathComponent(sessionId + ".json")),
               let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }

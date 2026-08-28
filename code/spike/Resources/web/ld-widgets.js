@@ -112,7 +112,7 @@
         }
         // 用户起的会话名最好认，派生名没信息量就用项目名；后台任务标 ~
         const label = (s.nameUserSet && s.name ? s.name : (s.project || '?')) + (s.kind === 'bg' ? ' ~' : '');
-        const phase = s.parked ? 'PARKED' : s.stalled ? 'STALLED' : (PHASE_LABEL[s.phase] || 'STANDBY');
+        const phase = s.parked ? 'PARKED' : s.stalled ? 'STALLED' : s.attention === 'permission' ? 'CONFIRM?' : s.attention === 'elicitation' ? 'FORM?' : (PHASE_LABEL[s.phase] || 'STANDBY');
         // 每列都补齐到定宽（含末列）：右对齐 / 居中的槽位靠整行等长才能对齐；名字截满时也要留出列间空格
         return `${fitCols(label.toUpperCase(), 16)} ${phase.padEnd(11)}${t.padEnd(9)}`;
       });

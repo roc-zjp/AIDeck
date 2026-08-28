@@ -905,6 +905,11 @@ if let i = CommandLine.arguments.firstIndex(of: "--quota") {
     exit(QuotaInstaller.run(Array(CommandLine.arguments[(i + 1)...])))
 }
 
+// 命令行模式：接入 / 卸载 / 查看 Notification hook 精细态数据源（./ld hooks on|off|status）
+if let i = CommandLine.arguments.firstIndex(of: "--hooks") {
+    exit(HooksInstaller.run(Array(CommandLine.arguments[(i + 1)...])))
+}
+
 // bundle id 去掉 .spike 后的一次性迁移（在一切 UserDefaults 读取之前）
 Prefs.migrateFromSpikeDomain()
 Autostart.migrateFromSpikeLabel()

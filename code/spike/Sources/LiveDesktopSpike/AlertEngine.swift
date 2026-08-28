@@ -58,14 +58,19 @@ final class AlertEngine: NSObject, UNUserNotificationCenterDelegate {
         var stillWaiting: Set<String> = []
         for s in state.sessions where s.phase == .waiting && !s.id.isEmpty {
             stillWaiting.insert(s.id)
-            guard s.idleSeconds >= threshold, !waitingNotified.contains(s.id) else { continue }
+            // 卡在确认框 / 表单是即时提醒（hook 已等约 6 秒才触发，本身就过滤了秒过的）；普通「等你输入」仍走分钟阈值
+            let effective = s.attention != nil ? 0 : threshold
+            guard s.idleSeconds >= effective, !waitingNotified.contains(s.id) else { continue }
             waitingNotified.insert(s.id)
             if seeded {     // 首拍只登记不发
                 let name = (s.nameIsUserSet ? s.name : nil) ?? s.project
-                post(id: "waiting-\(s.id)",
-                     title: "\(name) 等你输入",
-                     body: "已等待 \(max(1, s.idleSeconds / 60)) 分钟，点击回到对应终端",
-                     sound: true, userInfo: ["pid": Int(s.pid)])
+                let title: String, body: String
+                switch s.attention {
+                case .permission:  title = "\(name) 等你确认 \(s.tool ?? "工具")"; body = "点击回到对应终端批准 / 拒绝"
+                case .elicitation: title = "\(name) 等你填表单"; body = "MCP 表单在等你，点击回到对应终端"
+                case nil:          title = "\(name) 等你输入"; body = "已等待 \(max(1, s.idleSeconds / 60)) 分钟，点击回到对应终端"
+                }
+                post(id: "waiting-\(s.id)", title: title, body: body, sound: true, userInfo: ["pid": Int(s.pid)])
             }
         }
         // 不再等待（回答了 / 会话关了）就复位，下一次等待重新计

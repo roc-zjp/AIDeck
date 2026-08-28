@@ -43,6 +43,11 @@ final class HUDView: NSView {
     static func statusText(_ s: SessionState) -> String {
         if s.parked { return "已转后台" }
         if s.stalled { return "停滞 · \(dur(s.idleSeconds)) 无输出" }
+        switch s.attention {
+        case .permission:  return "等你确认 \(s.tool ?? "工具") · \(dur(s.idleSeconds))"
+        case .elicitation: return "等你填表单 · \(dur(s.idleSeconds))"
+        case nil: break
+        }
         let quiet = s.idleSeconds >= 120 ? " · \(dur(s.idleSeconds)) 无输出" : ""
         switch s.phase {
         case .waiting:  return "等你输入 · \(dur(s.idleSeconds))"
@@ -143,8 +148,8 @@ final class HUDView: NSView {
         let order: [ClaudePhase: Int] = [.waiting: 0, .running: 1, .thinking: 2, .idle: 3]
         let sorted = state.sessions.sorted { a, b in
             if (a.kind == "bg") != (b.kind == "bg") { return a.kind != "bg" }
-            let oa = a.parked ? 7 : a.stalled ? 8 : order[a.phase] ?? 9
-            let ob = b.parked ? 7 : b.stalled ? 8 : order[b.phase] ?? 9
+            let oa = a.parked ? 7 : a.stalled ? 8 : a.attention != nil ? -1 : order[a.phase] ?? 9
+            let ob = b.parked ? 7 : b.stalled ? 8 : b.attention != nil ? -1 : order[b.phase] ?? 9
             if oa != ob { return oa < ob }
             return a.phase == .waiting ? a.idleSeconds > b.idleSeconds : a.idleSeconds < b.idleSeconds
         }
@@ -166,8 +171,11 @@ final class HUDView: NSView {
         // 「真空闲」与「根本没装 / 没跑过 Claude Code」以前显示成一样，新用户会以为它坏了
         if sorted.isEmpty { headLabel.stringValue = state.claudeDetected ? "空闲 · 无活跃会话" : "未检测到 Claude Code 会话记录" }
         else {
+            let confirm = sorted.filter { $0.attention != nil }.count
+            let plainWaiting = waiting - confirm
             var parts: [String] = []
-            if waiting > 0 { parts.append("\(waiting) 个等你输入") }
+            if confirm > 0 { parts.append("\(confirm) 个等你确认") }
+            if plainWaiting > 0 { parts.append("\(plainWaiting) 个等你输入") }
             if busy > 0 { parts.append(waiting > 0 ? "\(busy) 个在跑" : "\(busy) 个会话在跑") }
             if stalled > 0 { parts.append("\(stalled) 个停滞") }
             headLabel.stringValue = parts.joined(separator: " · ")

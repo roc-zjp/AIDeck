@@ -90,11 +90,17 @@ PL
             off) $APP --quota uninstall;;
             *)   $APP --quota status;;
           esac;;
+  hooks)  # 精细态数据源：把 ld-hook 接进 Claude Code 的 Notification hook（改前整份备份，off 撤掉，决策 009）
+          case "${2:-status}" in
+            on)  $APP --hooks install;;
+            off) $APP --hooks uninstall;;
+            *)   $APP --hooks status;;
+          esac;;
   report) python3 "$(dirname "$0")/report.py";;
   status) if [ -n "$PID" ]; then
             echo "运行中 pid=$PID"
             echo "最近状态（phase,tool,会话数,覆盖率,渲染,可见性,真实帧率）："
             tail -3 diag.csv | cut -d, -f2,3,4,6,7,12,13 | sed 's/^/  /'
           else echo "未运行"; fi;;
-  *) echo "用法: ./ld {start|next|demo|celebrate|hud|widget|fx|model|skin|settings|autostart|quota|report|pause|stop|status}";;
+  *) echo "用法: ./ld {start|next|demo|celebrate|hud|widget|fx|model|skin|settings|autostart|quota|hooks|report|pause|stop|status}";;
 esac

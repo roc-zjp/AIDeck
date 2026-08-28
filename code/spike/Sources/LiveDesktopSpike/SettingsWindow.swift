@@ -13,6 +13,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var quotaActionButton: NSButton!
     private var notifStatusLabel: NSTextField!
     private var notifActionButton: NSButton!
+    private var hooksStatusLabel: NSTextField!
+    private var hooksActionButton: NSButton!
+    private var hooksInstalled = false
     private var quotaInstalled = false
     private var quotaTick = 0
     private var previewSizeConstraints: (w: NSLayoutConstraint, h: NSLayoutConstraint)?
@@ -46,6 +49,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         quotaTick += 1
         if quotaTick % 5 == 1 { refreshQuotaSection() }   // 5s 一刷：够跟上数据，又不必每秒读 settings.json
         if quotaTick % 5 == 3 { app?.alertEngine.refreshAuthorizationStatus { [weak self] in self?.refreshNotificationRow() } }  // 用户可能刚在系统设置里改了
+        if quotaTick % 5 == 4 { refreshHooksSection() }
     }
 
     /// 系统通知授权状态行：已允许 / 已拒绝（给「打开系统设置」）/ 尚未决定（给「请求授权」）
@@ -267,6 +271,21 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         controls.addArrangedSubview(wrappedLabel("接入只改 ~/.claude/settings.json 的 statusLine 一个键（改前整份备份），原状态栏命令原样透传、终端显示不变，可随时恢复",
                                                  size: 11, color: .secondaryLabelColor))
         refreshQuotaSection()
+
+        // 精细态（Notification hook，决策 009）：把「卡在确认框」从「在跑工具」里分出来
+        controls.addArrangedSubview(spacer(6))
+        controls.addArrangedSubview(sectionTitle("精细态（权限确认 / MCP 表单）"))
+        hooksStatusLabel = wrappedLabel("…", size: 12, color: .labelColor)
+        controls.addArrangedSubview(hooksStatusLabel)
+        let hooksButtons = NSStackView()
+        hooksButtons.orientation = .horizontal
+        hooksButtons.spacing = 6
+        hooksActionButton = smallButton("", action: #selector(hooksActionTapped))
+        hooksButtons.addArrangedSubview(hooksActionButton)
+        controls.addArrangedSubview(hooksButtons)
+        controls.addArrangedSubview(wrappedLabel("接入 ld-hook 到 Claude Code 的 Notification hook，把「卡在确认框等你点允许」从「在跑工具」里分出来——状态卡显示「等你确认」并即时提醒（不必等 5 分钟阈值）。改前整份备份，可随时撤掉。注意：与额度接入不同，这一步会用标准 JSON 重写整份 settings.json（键顺序可能变、JSONC 注释会丢），换来对已有其它 hooks 的用户也安全。",
+                                                 size: 11, color: .secondaryLabelColor))
+        refreshHooksSection()
 
         // 通用
         controls.addArrangedSubview(spacer(6))
@@ -618,6 +637,55 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             e.runModal()
         }
         refreshQuotaSection()
+    }
+
+    // MARK: - 精细态 hook（决策 009）
+
+    private func refreshHooksSection() {
+        guard hooksStatusLabel != nil else { return }
+        let st = HooksInstaller.inspect()
+        hooksInstalled = st.installed
+        if st.installed {
+            hooksStatusLabel.stringValue = "已接入 · 权限确认 / MCP 表单会显示为「等你确认」并即时提醒"
+        } else if let other = st.otherCommand {
+            hooksStatusLabel.stringValue = "接入路径不一致：Notification hook 指向 \(other)，重新接入即可修正"
+        } else {
+            hooksStatusLabel.stringValue = "未接入 · 权限确认目前只能靠「停滞」在半小时后兜底"
+        }
+        hooksActionButton.title = hooksInstalled ? "撤掉…" : "接入…"
+    }
+
+    @objc private func hooksActionTapped() {
+        let alert = NSAlert()
+        if hooksInstalled {
+            alert.messageText = "撤掉精细态 hook？"
+            alert.informativeText = """
+            从 \(HooksInstaller.settingsURL.path) 的 Notification hook 里删掉指向 ld-hook 的那一条（删前再整份备份一次），并清理本机 hook 文件。你原有的其它 hooks 原样保留。
+            """
+            alert.addButton(withTitle: "撤掉")
+        } else {
+            alert.messageText = "接入精细态 hook？"
+            alert.informativeText = """
+            将往 \(HooksInstaller.settingsURL.path) 的 hooks.Notification 加一条，指向本 App 自带的 ld-hook。
+
+            · 改前把整份 settings.json 备份到 \(HooksInstaller.backupDir.path)/
+            · ld-hook 只在权限确认 / MCP 表单弹出时写一个本地文件，只读、秒退、绝不阻塞 Claude Code
+            · 随时可在本页撤掉
+            · 注意：这一步会用标准 JSON 重写整份 settings.json（键顺序可能变、JSONC 注释会丢失），与额度接入保留原格式的方式不同
+            """
+            alert.addButton(withTitle: "接入")
+        }
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            if hooksInstalled { try HooksInstaller.uninstall() } else { try HooksInstaller.install() }
+        } catch {
+            let e = NSAlert(); e.alertStyle = .warning
+            e.messageText = hooksInstalled ? "撤掉失败" : "接入失败"
+            e.informativeText = "\(error)"
+            e.runModal()
+        }
+        refreshHooksSection()
     }
 
     @objc private func autostartToggled(_ sender: NSButton) {

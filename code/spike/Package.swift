@@ -15,6 +15,12 @@ let package = Package(
             name: "LdStatusline",
             path: "Sources/LdStatusline",
             swiftSettings: [.unsafeFlags(["-swift-version", "5"])]
+        ),
+        // Notification hook 只读监听器：抽 permission_prompt / elicitation 写盘，随 .app 分发（决策 009）
+        .executableTarget(
+            name: "LdHook",
+            path: "Sources/LdHook",
+            swiftSettings: [.unsafeFlags(["-swift-version", "5"])]
         )
     ]
 )
