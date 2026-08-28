@@ -22,9 +22,18 @@ enum Autostart {
         try? enable()
     }
 
+    /// 自启模式的 stderr 落这里——否则 launchd 拉起时全部诊断日志无处可去（自启出问题零线索）
+    static var stderrLogURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/AIDeck.log")
+    }
+
     static func enable() throws {
         let exe = Bundle.main.executablePath ?? CommandLine.arguments[0]
         let cwd = FileManager.default.currentDirectoryPath
+        let logPath = stderrLogURL.path
+        // StandardErrorPath 的目录必须先存在，否则 launchd 静默丢弃重定向
+        try? FileManager.default.createDirectory(at: stderrLogURL.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
         let xml = """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -33,6 +42,7 @@ enum Autostart {
           <key>ProgramArguments</key>
           <array><string>\(exe)</string><string>--log</string></array>
           <key>WorkingDirectory</key><string>\(cwd)</string>
+          <key>StandardErrorPath</key><string>\(logPath)</string>
           <key>RunAtLoad</key><true/>
           <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
         </dict></plist>

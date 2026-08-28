@@ -3,10 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
-    <key>CFBundleExecutable</key><string>LiveDesktopSpike</string>
+    <key>CFBundleExecutable</key><string>AIDeck</string>
     <key>CFBundleIdentifier</key><string>com.zhoujunpeng.livedesktop</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AIDeck</string>
+    <key>CFBundleIconFile</key><string>AIDeck</string>
     <key>CFBundleDisplayName</key><string>AIDeck</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.2</string>

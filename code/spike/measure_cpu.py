@@ -5,7 +5,7 @@ GPU 能耗需要 sudo powermetrics，本脚本不覆盖。"""
 import subprocess, time, os, sys
 
 BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                   "build/LiveDesktopSpike.app/Contents/MacOS/LiveDesktopSpike")
+                   "build/AIDeck.app/Contents/MacOS/AIDeck")
 SECS = int(sys.argv[1]) if len(sys.argv) > 1 else 20
 
 def webkit_pids():
@@ -26,7 +26,7 @@ def cputime(pids):
     return total
 
 def stop():
-    subprocess.run(['pkill','-f','MacOS/LiveDesktopSpike'], capture_output=True)
+    subprocess.run(['pkill','-f','MacOS/AIDeck'], capture_output=True)
     time.sleep(2)
 
 def scenario(label, args):

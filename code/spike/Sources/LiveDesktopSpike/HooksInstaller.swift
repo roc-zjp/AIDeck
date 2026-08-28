@@ -7,7 +7,7 @@ import Foundation
 /// 代价：重排键序、丢 JSONC 注释；换来的是对「已有其它 hooks 的用户」也安全。改前整份备份，可一键恢复。
 ///
 /// 只加/删一条：`hooks.Notification` 数组里 command 指向本机 ld-hook 的那个 group。用户原有 hooks 原样保留。
-/// 用法（命令行）：LiveDesktopSpike --hooks install | uninstall | status
+/// 用法（命令行）：AIDeck --hooks install | uninstall | status
 enum HooksInstaller {
     static let dir = QuotaProbe.dir
     static let hookBinaryURL = dir.appendingPathComponent("ld-hook")

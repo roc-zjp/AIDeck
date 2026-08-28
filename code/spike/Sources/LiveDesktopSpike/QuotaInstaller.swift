@@ -4,7 +4,7 @@ import Foundation
 ///
 /// 这是本项目**唯一**会改用户 settings.json 的地方（决策 005）：只碰 `statusLine` 一个键；
 /// 改前把整份文件备份到 ~/.config/live-desktop/backups/；原命令原样保留在 statusline.json 作透传；一条命令恢复。
-/// 用法（命令行）：LiveDesktopSpike --quota install | uninstall | status
+/// 用法（命令行）：AIDeck --quota install | uninstall | status
 ///
 /// statusLine 在 settings 里有两种写法，都要认：
 ///   对象   {"type":"command","command":"...","padding":"normal","refreshInterval":1000,"hideVimModeIndicator":false}

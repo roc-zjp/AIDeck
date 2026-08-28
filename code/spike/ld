@@ -1,11 +1,11 @@
 #!/bin/bash
 # 不依赖菜单栏的控制入口
 cd "$(dirname "$0")"
-APP=./build/LiveDesktopSpike.app/Contents/MacOS/LiveDesktopSpike
-PID=$(pgrep -f "MacOS/LiveDesktopSpike" | head -1)
+APP=./build/AIDeck.app/Contents/MacOS/AIDeck
+PID=$(pgrep -f "MacOS/AIDeck" | head -1)
 case "${1:-status}" in
-  start)  pkill -f MacOS/LiveDesktopSpike 2>/dev/null; sleep 1
-          nohup $APP --log >/dev/null 2>status.log & sleep 2; echo "已启动 pid=$(pgrep -f MacOS/LiveDesktopSpike|head -1)";;
+  start)  pkill -f MacOS/AIDeck 2>/dev/null; sleep 1
+          nohup $APP --log >/dev/null 2>status.log & sleep 2; echo "已启动 pid=$(pgrep -f MacOS/AIDeck|head -1)";;
   next)   [ -n "$PID" ] && kill -USR2 "$PID" && echo "已切换到下一个动画" || echo "未运行";;
   hud)    if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi
           case "${2:-}" in
@@ -26,7 +26,7 @@ case "${1:-status}" in
   pause)  [ -n "$PID" ] && kill -USR1 "$PID" && echo "已切换暂停/恢复" || echo "未运行";;
   settings) if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi
           echo "settings" >> ~/.live-desktop.cmd; echo "设置窗口已打开（实时预览 + 小工具槽位 + 事件反应 + 状态卡）";;
-  stop)   pkill -f MacOS/LiveDesktopSpike && echo "已退出";;
+  stop)   pkill -f MacOS/AIDeck && echo "已退出";;
   celebrate) if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi
           echo "celebrate" >> ~/.live-desktop.cmd
           echo "已触发一次庆祝动作（篮球皮肤：全场闪光 + 投篮 + 记分牌 SCORE +1；预览用，不动 git）";;
@@ -46,7 +46,7 @@ case "${1:-status}" in
 <plist version="1.0"><dict>
   <key>Label</key><string>com.zhoujunpeng.livedesktop</string>
   <key>ProgramArguments</key>
-  <array><string>$DIR/build/LiveDesktopSpike.app/Contents/MacOS/LiveDesktopSpike</string><string>--log</string></array>
+  <array><string>$DIR/build/LiveDesktopSpike.app/Contents/MacOS/AIDeck</string><string>--log</string></array>
   <key>WorkingDirectory</key><string>$DIR</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
