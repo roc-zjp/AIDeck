@@ -8,11 +8,7 @@ final class ScreenUnit {
     let displayID: CGDirectDisplayID
     let window: DesktopWindow
     let host: AnimationHost
-    /// 状态卡独立成窗，挂在图标层之上，不受动画窗口层级牵连；原生绘制，不用 WebView
-    let hudWindow: HUDWindow
-    let hudView: HUDView
     var rendering = true
-    var hudSize = CGSize(width: 232, height: 86)
     private let small: Bool
 
     init(screen: NSScreen, animation: String, levelOverride: Int? = nil, small: Bool = false) {
@@ -27,12 +23,6 @@ final class ScreenUnit {
         host.pushConfig(Prefs.config(skin: animation))     // 页面就绪时连同状态一起补发
         host.visibleInsets = ScreenUnit.insets(of: screen)
         window.orderFront(nil)
-
-        hudWindow = HUDWindow(screen: screen)
-        hudView = HUDView(frame: hudWindow.contentView?.bounds ?? .zero)
-        hudView.autoresizingMask = [.width, .height]
-        hudWindow.contentView = hudView
-        hudWindow.orderFront(nil)
     }
 
     /// 可见桌面相对屏幕 frame 的四边内缩量（点，页面坐标系 y 向下：top 是菜单栏、bottom 通常是 Dock）
@@ -53,11 +43,10 @@ final class ScreenUnit {
         window.setFrame(newScreen.frame, display: true)
     }
 
-    /// 显示器拔掉了：两个窗口都要真正下线。
-    /// 只 orderOut 不够——窗口对象仍被 NSApp 持有，HUD 卡会继续留在屏上，WKWebView 的 WebContent 进程也不会退出。
+    /// 显示器拔掉了：窗口要真正下线。
+    /// 只 orderOut 不够——窗口对象仍被 NSApp 持有，WKWebView 的 WebContent 进程也不会退出。
+    /// （状态卡不在这里：它全局只有一张、归 AppDelegate 管，决策 010）
     func tearDown() {
-        hudWindow.orderOut(nil)
-        hudWindow.close()
         host.shutdown()
         window.orderOut(nil)
         window.close()
@@ -66,6 +55,11 @@ final class ScreenUnit {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var units: [ScreenUnit] = []
+    /// 状态卡全局唯一一张（决策 010）：独立成窗、挂图标层之上、原生绘制；生命周期与显示器无关，
+    /// 住在用户最后放它的那块屏（hudScreen），那块屏不在时临时落到主屏，插回即归位
+    private let hudWindow = HUDWindow()
+    private let hudView = HUDView(frame: CGRect(x: 0, y: 0, width: 260, height: 100))
+    private var hudSize = CGSize(width: 232, height: 86)
     private var statusItem: NSStatusItem!
     private let probe = ClaudeStateProbe()
     private let quotaProbe = QuotaProbe()
@@ -101,6 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 旁听桌面上的左键点击（全局监视器只"看"发给别的 App 的事件，不拦截；我们的窗口本来就点击穿透，点击照常落到 Finder）
         NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in self?.pushMouse(NSEvent.mouseLocation, down: true) }
         ModelServer.ensureUserModelsDir()                                                     // 自定义 3D 模型目录
+        setupHUD()
         reconcileScreens()
         installMouseTracking()
         buildStatusItem()
@@ -160,10 +155,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 FileHandle.standardError.write("[selftest 工具流] \(tl)\n".data(using: .utf8)!)
                 let ss = self?.state.sessions.map { "\($0.name ?? $0.project)[\($0.kind)]/\($0.parked ? "parked" : $0.stalled ? "stalled" : $0.phase.rawValue)/\($0.tool ?? "-")/\($0.idleSeconds)s" }.joined(separator: "  ") ?? ""
                 FileHandle.standardError.write("[selftest 会话] 全局=\(self?.state.phase.rawValue ?? "?")  \(ss)\n".data(using: .utf8)!)
-                for unit in self?.units ?? [] {
-                    let f = unit.hudWindow.frame
+                if let self, let home = self.hudHomeScreen() {
+                    let f = self.hudWindow.frame
                     FileHandle.standardError.write(
-                        "[selftest HUD窗] 屏\(unit.displayID) 窗口=\(Int(f.width))x\(Int(f.height)) @\(Int(f.minX)),\(Int(f.minY)) 屏内偏移=\(Int(f.minX - unit.screen.frame.minX)),\(Int(f.minY - unit.screen.frame.minY))\n".data(using: .utf8)!)
+                        "[selftest HUD窗] 家屏\(ScreenUnit.displayID(of: home)) 窗口=\(Int(f.width))x\(Int(f.height)) @\(Int(f.minX)),\(Int(f.minY)) 屏内偏移=\(Int(f.minX - home.frame.minX)),\(Int(f.minY - home.frame.minY)) 显示器=\(NSScreen.screens.count) 状态卡窗口数=\(NSApp.windows.filter { $0 is HUDWindow }.count)\n".data(using: .utf8)!)
                 }
             }
         }
@@ -185,6 +180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         diagHandle = nil
         units.forEach { $0.tearDown() }
         units.removeAll()
+        hudWindow.close()
     }
 
     /// 快速用户切换到别的账户后，我们的窗口留在后台登录会话里，occlusionState 未必判不可见——按 CGSession 的 on-console 位兜底。
@@ -238,15 +234,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         gone.forEach { $0.tearDown() }
         units = kept
         if created > 0 || !gone.isEmpty {
-            let through = UserDefaults.standard.bool(forKey: "hudClickThrough")
-            let float = UserDefaults.standard.bool(forKey: "hudFloat")
-            units.forEach { $0.hudWindow.setFloating(float); $0.hudWindow.setClickThrough(through) }
             FileHandle.standardError.write("[screens] 显示器 \(screens.count) 个：新建 \(created) 下线 \(gone.count)\n".data(using: .utf8)!)
         }
-        // 新建的单元要立刻拿到当前状态与尺寸，否则要等下一拍才会从 (0,0) 挪到正确位置
-        units.forEach { $0.hudView.update(state); $0.hudSize = $0.hudView.cardSize }
-        // 拖动中 / 编辑中不重排，否则会把卡从用户手里拽走
-        if dragOffset == nil && !hudEditing { layoutHUDs() }
+        // 状态卡的家屏可能刚拔掉（临时落主屏）或刚插回（归位）；拖动中 / 编辑中不重排，否则会把卡从用户手里拽走
+        if dragOffset == nil && !hudEditing { layoutHUD() }
     }
 
     // MARK: - 每秒一拍：探测状态 + 决定是否渲染
@@ -257,64 +248,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var hudEditTimer: Timer?
     private var hudMoveObserver: Any?
 
-    private func pushHudState(to u: ScreenUnit) {
-        u.hudView.update(state)
-        let newSize = u.hudView.cardSize
-        guard newSize != u.hudSize else { return }
-        u.hudSize = newSize
+    private func setupHUD() {
+        hudView.autoresizingMask = [.width, .height]
+        hudWindow.contentView = hudView
+        hudWindow.setFloating(UserDefaults.standard.bool(forKey: "hudFloat"))
+        hudWindow.setClickThrough(UserDefaults.standard.bool(forKey: "hudClickThrough"))
+        hudWindow.orderFront(nil)
+    }
+
+    private func pushHudState() {
+        hudView.update(state)
+        let newSize = hudView.cardSize
+        guard newSize != hudSize else { return }
+        hudSize = newSize
         // 拖动中只改尺寸不动位置，否则会把窗口从用户手里拽走
         if dragOffset != nil || hudEditing {
-            u.hudWindow.setContentSize(newSize)
+            hudWindow.setContentSize(newSize)
         } else {
-            layoutHUDs()
+            layoutHUD()
         }
     }
 
-    /// 自由坐标只对主屏生效，其余屏回落到 anchor
-    private var programmaticMove = false
     private var dragTimer: Timer?
     private var wasPressed = false
     private var dragOffset: CGSize?
     private var loggedFirstHit = false
 
-    private func layoutHUDs() {
-        programmaticMove = true
-        defer { DispatchQueue.main.async { self.programmaticMove = false } }
+    /// 状态卡的家屏：用户最后把它放在哪块屏（hudScreen 存 displayID）。没存过、或那块屏此刻不在，落到主屏
+    /// （NSScreen.screens.first 是带菜单栏的主显示器，不随键盘焦点变）。家屏拔掉时不改写 hudScreen，插回即归位
+    private func hudHomeScreen() -> NSScreen? {
+        let screens = NSScreen.screens
+        if let v = UserDefaults.standard.object(forKey: "hudScreen"), let id = Self.num(v),
+           let s = screens.first(where: { Double(ScreenUnit.displayID(of: $0)) == id }) { return s }
+        return screens.first
+    }
+
+    /// 位置 = 家屏 + 屏内偏移（hudOffset，相对家屏原点），改分辨率 / 重排屏幕后仍落在同一块屏的同一位置；
+    /// 没有自由位置就按 hudAnchor 吸附家屏四角。最后夹回屏内，避免家屏换成更小的屏后跑到看不见的地方
+    private func layoutHUD() {
+        guard let screen = hudHomeScreen() else { return }
         let d = UserDefaults.standard
-        // 每块屏各自存位置（相对本屏原点的偏移）：早先自由坐标只给主屏，副屏拖完一秒内就被拽回锚点
-        let saved = d.dictionary(forKey: "hudPositions") ?? [:]
-        for (i, u) in units.enumerated() {
-            let size = u.hudSize
-            var origin: CGPoint
-            // 宽容解析：runtime 存的是数字，手工 defaults write 进来的是字符串，都认
-            if let arr = saved[String(u.displayID)] as? [Any], arr.count == 2,
-               let dx = Self.num(arr[0]), let dy = Self.num(arr[1]) {
-                origin = CGPoint(x: u.screen.frame.minX + dx, y: u.screen.frame.minY + dy)
-            } else if i == 0, d.object(forKey: "hudX") != nil {
-                // 旧格式（主屏绝对坐标）兼容，保存过一次新格式后就不再走这里
-                origin = CGPoint(x: d.double(forKey: "hudX"), y: d.double(forKey: "hudY"))
-            } else {
-                origin = anchorOrigin(d.string(forKey: "hudAnchor") ?? "br", u.screen, size)
-            }
-            // 夹回屏内，避免改分辨率/拔显示器后跑到看不见的地方
-            let vf = u.screen.visibleFrame
-            origin.x = min(max(origin.x, vf.minX), max(vf.minX, vf.maxX - size.width))
-            origin.y = min(max(origin.y, vf.minY), max(vf.minY, vf.maxY - size.height))
-            u.hudWindow.setFrame(CGRect(origin: origin, size: size), display: true)
+        let size = hudSize
+        var origin: CGPoint
+        // 宽容解析：runtime 存的是数字，手工 defaults write 进来的是字符串，都认
+        if let arr = d.array(forKey: "hudOffset"), arr.count == 2,
+           let dx = Self.num(arr[0]), let dy = Self.num(arr[1]) {
+            origin = CGPoint(x: screen.frame.minX + dx, y: screen.frame.minY + dy)
+        } else if let legacy = legacyHudOrigin(on: screen) {
+            origin = legacy
+        } else {
+            origin = anchorOrigin(d.string(forKey: "hudAnchor") ?? "br", screen, size)
         }
+        hudWindow.setFrame(CGRect(origin: clampToScreen(origin, size: size, screen: screen), size: size), display: true)
+    }
+
+    /// 决策 010 之前每屏一张、按 displayID 各存偏移（hudPositions），更早只有主屏绝对坐标（hudX/hudY）。
+    /// 升级后取家屏名下那份沿用；保存过一次新格式就清掉旧键，不再走这里
+    private func legacyHudOrigin(on screen: NSScreen) -> CGPoint? {
+        let d = UserDefaults.standard
+        if let saved = d.dictionary(forKey: "hudPositions"),
+           let arr = saved[String(ScreenUnit.displayID(of: screen))] as? [Any], arr.count == 2,
+           let dx = Self.num(arr[0]), let dy = Self.num(arr[1]) {
+            return CGPoint(x: screen.frame.minX + dx, y: screen.frame.minY + dy)
+        }
+        if d.object(forKey: "hudX") != nil { return CGPoint(x: d.double(forKey: "hudX"), y: d.double(forKey: "hudY")) }
+        return nil
     }
 
     private static func num(_ v: Any) -> Double? {
         (v as? NSNumber)?.doubleValue ?? Double(v as? String ?? "")
     }
 
-    /// 按 displayID 记录该屏状态卡相对屏原点的偏移
-    private func saveHudPosition(_ u: ScreenUnit) {
-        let f = u.hudWindow.frame
-        var saved = UserDefaults.standard.dictionary(forKey: "hudPositions") as? [String: [Double]] ?? [:]
-        saved[String(u.displayID)] = [Double(f.minX - u.screen.frame.minX), Double(f.minY - u.screen.frame.minY)]
-        UserDefaults.standard.set(saved, forKey: "hudPositions")
-        FileHandle.standardError.write("[hud] 位置已保存 屏\(u.displayID) 偏移 \(Int(f.minX - u.screen.frame.minX)),\(Int(f.minY - u.screen.frame.minY))\n".data(using: .utf8)!)
+    /// 松手 / 编辑结束：卡现在压在哪块屏（NSWindow.screen = 重叠最多的那块），就把那块屏记成家屏，并存屏内偏移
+    private func saveHudPosition() {
+        guard let screen = hudWindow.screen ?? hudHomeScreen() else { return }
+        let f = hudWindow.frame
+        let id = ScreenUnit.displayID(of: screen)
+        let d = UserDefaults.standard
+        d.set(Int(id), forKey: "hudScreen")
+        d.set([Double(f.minX - screen.frame.minX), Double(f.minY - screen.frame.minY)], forKey: "hudOffset")
+        d.removeObject(forKey: "hudPositions"); d.removeObject(forKey: "hudX"); d.removeObject(forKey: "hudY")
+        FileHandle.standardError.write("[hud] 位置已保存 家屏\(id) 偏移 \(Int(f.minX - screen.frame.minX)),\(Int(f.minY - screen.frame.minY))\n".data(using: .utf8)!)
     }
 
     /// 不允许把卡片拖出屏幕 —— 拖丢了就再也找不回来
@@ -347,7 +361,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dragTimer = t
     }
 
-    private var dragUnit: ScreenUnit?
     private var wasRightPressed = false
 
     /// 把全局鼠标位置换算成"光标所在屏"的页面坐标推给该屏页面；其他屏推一次 nil。只推给闸门开着（真在渲染）的屏——
@@ -368,54 +381,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pushMouse(p, down: false)
 
         // 右键状态卡 → 打开设置。菜单栏在刘海屏上可能被挤掉，状态卡是唯一一直看得见的入口
-        if rightPressed && !wasRightPressed, units.contains(where: { $0.hudWindow.frame.contains(p) }) {
+        if rightPressed && !wasRightPressed, hudWindow.frame.contains(p) {
             openSettings()
             return
         }
 
-        if pressed && !wasPressed {                       // 刚按下：命中任意一块屏的状态卡都算
+        if pressed && !wasPressed {                       // 刚按下：命中状态卡
             guard !UserDefaults.standard.bool(forKey: "hudClickThrough") else { return }
-            guard let u = units.first(where: { $0.hudWindow.frame.contains(p) }) else { return }
-            dragUnit = u
-            let f = u.hudWindow.frame
+            guard hudWindow.frame.contains(p) else { return }
+            let f = hudWindow.frame
             dragOffset = CGSize(width: p.x - f.minX, height: p.y - f.minY)
-            u.hudView.setDragging(true)
+            hudView.setDragging(true)
             if !loggedFirstHit {
                 loggedFirstHit = true
-                FileHandle.standardError.write("[mouse] 命中状态卡（屏\(u.displayID)），开始拖动\n".data(using: .utf8)!)
+                FileHandle.standardError.write("[mouse] 命中状态卡，开始拖动\n".data(using: .utf8)!)
             }
-        } else if pressed, let off = dragOffset, let u = dragUnit {   // 拖动中
-            let o = clampToScreen(CGPoint(x: p.x - off.width, y: p.y - off.height),
-                                  size: u.hudWindow.frame.size, screen: u.screen)
-            u.hudWindow.setFrameOrigin(o)
-        } else if !pressed, dragOffset != nil {            // 松手：存到该屏名下
-            if let u = dragUnit { u.hudView.setDragging(false); saveHudPosition(u) }
+        } else if pressed, let off = dragOffset {          // 拖动中：光标在哪块屏就夹在哪块屏内——卡跟着光标跨屏，但不会卡在两屏之间的缝里
+            let target = NSScreen.screens.first(where: { $0.frame.contains(p) }) ?? hudWindow.screen ?? NSScreen.screens.first
+            if let s = target {
+                hudWindow.setFrameOrigin(clampToScreen(CGPoint(x: p.x - off.width, y: p.y - off.height),
+                                                       size: hudWindow.frame.size, screen: s))
+            }
+        } else if !pressed, dragOffset != nil {            // 松手：卡压在哪块屏就记哪块屏为家
+            hudView.setDragging(false)
+            saveHudPosition()
             dragOffset = nil
-            dragUnit = nil
         }
     }
 
     func setClickThrough(_ on: Bool) {
         UserDefaults.standard.set(on, forKey: "hudClickThrough")
-        units.forEach { $0.hudWindow.setClickThrough(on) }
+        hudWindow.setClickThrough(on)
     }
 
     /// 状态卡置顶悬浮：全局状态指引，不该只在桌面露出时才看得见
     func setHudFloat(_ on: Bool) {
         UserDefaults.standard.set(on, forKey: "hudFloat")
-        units.forEach { $0.hudWindow.setFloating(on) }
+        hudWindow.setFloating(on)
         FileHandle.standardError.write("[hud] 置顶悬浮 \(on ? "开" : "关")\n".data(using: .utf8)!)
     }
 
     private func startHudEdit() {
-        guard !units.isEmpty, !hudEditing else { return }
+        guard !hudEditing else { return }
         hudEditing = true
-        units.forEach { $0.hudWindow.setEditing(true); $0.hudView.setDragging(true) }   // 每块屏的卡都进入编辑
+        hudWindow.setEditing(true); hudView.setDragging(true)
         hudMoveObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.didMoveNotification, object: nil, queue: .main
-        ) { [weak self] n in
-            guard let self, self.units.contains(where: { $0.hudWindow === n.object as? HUDWindow }) else { return }
-            self.scheduleHudEditFinish(1.5)                        // 松手静止 1.5s 即保存
+            forName: NSWindow.didMoveNotification, object: hudWindow, queue: .main
+        ) { [weak self] _ in
+            self?.scheduleHudEditFinish(1.5)                       // 松手静止 1.5s 即保存
         }
         scheduleHudEditFinish(20)                                  // 完全没动则 20s 自动退出
     }
@@ -428,24 +441,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func finishHudEdit() {
-        guard hudEditing, !units.isEmpty else { return }
+        guard hudEditing else { return }
         hudEditing = false
         hudEditTimer?.invalidate(); hudEditTimer = nil
         if let o = hudMoveObserver { NotificationCenter.default.removeObserver(o); hudMoveObserver = nil }
-        for u in units {
-            saveHudPosition(u)
-            u.hudWindow.setEditing(false)
-            u.hudView.setDragging(false)
-        }
-        layoutHUDs()
+        saveHudPosition()
+        hudWindow.setEditing(false)
+        hudView.setDragging(false)
+        layoutHUD()
     }
 
+    /// 吸附四角 = 清掉自由位置；卡留在当前家屏（hudScreen 不动），四角指的是家屏的四角
     private func setHudAnchor(_ a: String) {
         let d = UserDefaults.standard
-        d.removeObject(forKey: "hudX"); d.removeObject(forKey: "hudY")
-        d.removeObject(forKey: "hudPositions")     // 吸附四角 = 清掉所有屏的自由位置
+        d.removeObject(forKey: "hudX"); d.removeObject(forKey: "hudY"); d.removeObject(forKey: "hudPositions")
+        d.removeObject(forKey: "hudOffset")
         d.set(a, forKey: "hudAnchor")
-        layoutHUDs()
+        layoutHUD()
     }
 
     // MARK: - 控制文件（菜单栏在刘海屏可能不可用，命令行必须能全权控制）
@@ -506,9 +518,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastCoverage = cov.max() ?? 0
 
         let onConsole = Self.sessionOnConsole
+        pushHudState()
         for (i, unit) in units.enumerated() {
             unit.host.push(state: state)
-            pushHudState(to: unit)
             let occluded = !unit.window.occlusionState.contains(.visible)
             if i == 0 { lastOccluded = occluded }
             let coverage = i < cov.count ? cov[i] : 0
@@ -709,8 +721,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         float.target = self
         float.state = UserDefaults.standard.bool(forKey: "hudFloat") ? .on : .off
         menu.addItem(float)
-        let cur = UserDefaults.standard.object(forKey: "hudX") != nil
-            ? "" : (UserDefaults.standard.string(forKey: "hudAnchor") ?? "br")
+        let hudDefaults = UserDefaults.standard
+        let hasFreePosition = ["hudOffset", "hudPositions", "hudX"].contains { hudDefaults.object(forKey: $0) != nil }
+        let cur = hasFreePosition ? "" : (hudDefaults.string(forKey: "hudAnchor") ?? "br")
         for (code, name) in [("tl","左上"),("tr","右上"),("bl","左下"),("br","右下")] {
             let it = NSMenuItem(title: "   " + name, action: #selector(pickHudAnchor(_:)), keyEquivalent: "")
             it.target = self

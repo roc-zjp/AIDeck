@@ -18,13 +18,13 @@ final class DragOverlay: NSView {
     }
 }
 
-/// 状态卡窗口：挂在**桌面图标层之上**，因此永远不会被图标压住；
+/// 状态卡窗口：**全局唯一一张**（决策 010，不按显示器复制），挂在**桌面图标层之上**，因此永远不会被图标压住；
 /// 但仍低于普通应用窗口，所以只在桌面露出时可见——这正是它该有的行为。
-/// 平时点击穿透，进入编辑模式时才接收鼠标、允许直接拖动。
+/// 位置归 AppDelegate 管（家屏 + 屏内偏移），可跨屏拖到任意一块显示器。
 final class HUDWindow: NSWindow {
     private var normalLevel: NSWindow.Level = .normal
 
-    init(screen: NSScreen) {
+    init() {
         super.init(contentRect: CGRect(x: 0, y: 0, width: 260, height: 100),
                    styleMask: [.borderless], backing: .buffered, defer: false)
 

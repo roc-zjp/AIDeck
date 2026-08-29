@@ -253,7 +253,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         through.state = UserDefaults.standard.bool(forKey: "hudClickThrough") ? .on : .off
         through.font = .systemFont(ofSize: 12)
         controls.addArrangedSubview(through)
-        controls.addArrangedSubview(label("位置：直接用鼠标把状态卡拖到想要的地方（每块屏各自记忆）；右键状态卡可随时打开本设置",
+        controls.addArrangedSubview(label("位置：全局只有一张，直接用鼠标拖到想要的地方（可跨屏拖到任意一块显示器，记住最后放的那块屏）；右键状态卡可随时打开本设置",
                                           size: 11, color: .secondaryLabelColor))
 
         // Claude 额度（M3 收尾：QuotaInstaller 的 UI 壳，与 ./ld quota 同一套逻辑）
