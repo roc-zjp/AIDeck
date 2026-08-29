@@ -18,6 +18,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var hooksInstalled = false
     private var scrollView: NSScrollView!
     private var sectionAnchors: [String: NSView] = [:]     // 深链接：菜单 / 欢迎面板直达某区块
+    private var sectionPage: [String: Int] = [:]           // 区块在哪一页
+    private var pages: [NSStackView] = []
+    private var pageTabs: NSSegmentedControl!
+    private let columnWidth: CGFloat = 400                 // 右列固定宽：说明文字统一按此折行
     private var quotaInstalled = false
     private var quotaTick = 0
     private var previewSizeConstraints: (w: NSLayoutConstraint, h: NSLayoutConstraint)?
@@ -57,6 +61,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     /// 把右列滚到某个区块顶部（菜单栏「点击接入」/ 欢迎面板深链接进来时用）。区块已在首屏时也无害
     func reveal(_ section: String) {
         guard let v = sectionAnchors[section], let doc = scrollView?.documentView else { return }
+        if let pi = sectionPage[section] { showPage(pi) }
         window?.layoutIfNeeded()
         let y = max(0, v.convert(v.bounds, to: doc).minY - 8)
         scrollView.contentView.scroll(to: NSPoint(x: 0, y: y))
@@ -67,7 +72,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private func refreshNotificationRow() {
         guard let engine = app?.alertEngine, notifStatusLabel != nil else { return }
         guard engine.hasBundle else {
-            notifStatusLabel.stringValue = "系统通知：裸二进制无通知能力（用 build.sh 组的 .app 运行才有）"
+            notifStatusLabel.stringValue = "系统通知：当前运行方式不支持通知"
             notifActionButton.isHidden = true
             return
         }
@@ -77,7 +82,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             notifStatusLabel.textColor = .secondaryLabelColor
             notifActionButton.isHidden = true
         case .denied:
-            notifStatusLabel.stringValue = "系统通知权限：已拒绝——上面的勾选无效，一条都不会送达"
+            notifStatusLabel.stringValue = "系统通知权限：已拒绝，通知不会送达"
             notifStatusLabel.textColor = .systemOrange
             notifActionButton.title = "打开系统设置"
             notifActionButton.isHidden = false
@@ -162,13 +167,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         previewNote.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(previewNote)
 
-        // 右：控制列
+        // 右：控制列。分三页（分段控件切换）——数据接入 / 外观 / 通知与启动，每页几块、不需要滚动；
+        // 每块统一「标题 → 状态 → 操作 → 一行说明」，列宽固定、说明按同一宽度折行。
+        // 以前 9 块平铺、说明有的 320 折行有的单行拉到 600，用户反馈"乱、没条理"（2026-08-29）
         let controls = NSStackView()
         controls.orientation = .vertical
         controls.alignment = .leading
-        controls.spacing = 8
+        controls.spacing = 12
         controls.translatesAutoresizingMaskIntoConstraints = false
-        // 右列装进滚动容器：区块会继续变多，窗口不该无限长高；显示不下就上下滚动
         let doc = FlippedView()          // documentView 需翻转坐标系，内容才从顶部排起
         doc.translatesAutoresizingMaskIntoConstraints = false
         doc.addSubview(controls)
@@ -181,162 +187,117 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         content.addSubview(scroll)
         scrollView = scroll
 
-        // 数据接入（首屏第一块）：首次使用最先要配的就是它——菜单栏「未接入 · 点击接入」与欢迎面板都直达这里。
-        // 以前排在第 7 块，不熟的用户点进设置停在「皮肤」，不知道往下翻（2026-08-29 用户实测反馈）
-        let quotaTitle = sectionTitle("数据接入 · 额度（五小时 / 七天用量）")
-        sectionAnchors["quota"] = quotaTitle
-        controls.addArrangedSubview(quotaTitle)
+        let tabs = NSSegmentedControl(labels: ["数据接入", "外观", "通知与启动"], trackingMode: .selectOne,
+                                      target: self, action: #selector(pageChanged(_:)))
+        tabs.segmentStyle = .automatic
+        tabs.translatesAutoresizingMaskIntoConstraints = false
+        tabs.widthAnchor.constraint(equalToConstant: columnWidth).isActive = true
+        controls.addArrangedSubview(tabs)
+        pageTabs = tabs
+        pages = (0..<3).map { _ in
+            let p = NSStackView(); p.orientation = .vertical; p.alignment = .leading; p.spacing = 8
+            p.translatesAutoresizingMaskIntoConstraints = false
+            p.widthAnchor.constraint(equalToConstant: columnWidth).isActive = true
+            return p
+        }
+        pages.forEach { controls.addArrangedSubview($0) }
+        let access = pages[0], look = pages[1], general = pages[2]
+
+        // ---------- 页 1：数据接入（首次使用最先要配的；菜单栏「点击接入」与欢迎面板直达这里）
+        sectionAnchors["quota"] = section(access, "额度（五小时 / 七天用量）", first: true); sectionPage["quota"] = 0
         quotaStatusLabel = wrappedLabel("…", size: 12, color: .labelColor)
-        controls.addArrangedSubview(quotaStatusLabel)
-        let quotaButtons = NSStackView()
-        quotaButtons.orientation = .horizontal
-        quotaButtons.spacing = 6
+        access.addArrangedSubview(quotaStatusLabel)
+        let quotaButtons = row()
         quotaActionButton = smallButton("", action: #selector(quotaActionTapped))
         quotaButtons.addArrangedSubview(quotaActionButton)
         quotaButtons.addArrangedSubview(smallButton("打开数据目录", action: #selector(openQuotaDir)))
-        controls.addArrangedSubview(quotaButtons)
-        controls.addArrangedSubview(wrappedLabel("接入方式：将 ~/.claude/settings.json 的 statusLine 指向随附的透传程序，原状态栏命令原样执行、终端显示不变。接入前自动备份完整配置，可随时一键恢复。",
-                                                 size: 11, color: .secondaryLabelColor))
+        access.addArrangedSubview(quotaButtons)
+        access.addArrangedSubview(note("接入后原状态栏命令原样执行，终端显示不变。接入前自动备份配置，可随时恢复。"))
         refreshQuotaSection()
 
-        controls.addArrangedSubview(spacer(6))
-        let hooksTitle = sectionTitle("数据接入 · 权限确认状态")
-        sectionAnchors["hooks"] = hooksTitle
-        controls.addArrangedSubview(hooksTitle)
+        sectionAnchors["hooks"] = section(access, "权限确认状态"); sectionPage["hooks"] = 0
         hooksStatusLabel = wrappedLabel("…", size: 12, color: .labelColor)
-        controls.addArrangedSubview(hooksStatusLabel)
-        let hooksButtons = NSStackView()
-        hooksButtons.orientation = .horizontal
-        hooksButtons.spacing = 6
+        access.addArrangedSubview(hooksStatusLabel)
+        let hooksButtons = row()
         hooksActionButton = smallButton("", action: #selector(hooksActionTapped))
         hooksButtons.addArrangedSubview(hooksActionButton)
-        controls.addArrangedSubview(hooksButtons)
-        controls.addArrangedSubview(wrappedLabel("接入方式：在 Claude Code 的 Notification hook 中登记随附的只读监听程序，会话等待权限确认或 MCP 表单时即可精确显示「等待确认」并即时通知。接入前自动备份完整配置，可随时撤销。注：此项以标准 JSON 重写整份 settings.json，键顺序可能改变、注释不保留。",
-                                                 size: 11, color: .secondaryLabelColor))
+        access.addArrangedSubview(hooksButtons)
+        access.addArrangedSubview(note("接入后可精确显示「等待确认」并即时通知。接入前自动备份配置，可随时撤销；此项以标准 JSON 重写配置文件，注释不保留。"))
         refreshHooksSection()
 
-        // 皮肤：内置 + ~/.config/live-desktop/skins 里的自定义
-        controls.addArrangedSubview(spacer(6))
-        controls.addArrangedSubview(sectionTitle("皮肤"))
+        // ---------- 页 2：外观
+        section(look, "皮肤", first: true)
         skinPopup = NSPopUpButton()
         skinPopup.target = self
         skinPopup.action = #selector(skinChanged(_:))
+        skinPopup.widthAnchor.constraint(equalToConstant: 220).isActive = true
         rebuildSkinPopup(selecting: app?.currentAnimation ?? "")
-        controls.addArrangedSubview(skinPopup)
-        let skinButtons = NSStackView()
-        skinButtons.orientation = .horizontal
-        skinButtons.spacing = 6
-        for (title, sel) in [("新建皮肤（从模板）", #selector(newSkin)), ("打开皮肤目录", #selector(openSkinsDir)), ("重新加载", #selector(reloadCurrentSkin))] {
-            let b = NSButton(title: title, target: self, action: sel)
-            b.bezelStyle = .rounded
-            b.controlSize = .small
-            b.font = .systemFont(ofSize: 11)
-            skinButtons.addArrangedSubview(b)
+        look.addArrangedSubview(skinPopup)
+        let skinButtons = row()
+        for (title, sel) in [("新建皮肤", #selector(newSkin)), ("打开皮肤目录", #selector(openSkinsDir)), ("重新加载", #selector(reloadCurrentSkin))] {
+            skinButtons.addArrangedSubview(smallButton(title, action: sel))
         }
-        controls.addArrangedSubview(skinButtons)
-        controls.addArrangedSubview(label("自定义皮肤 = 一个自包含 HTML，放进皮肤目录即出现在列表；契约见目录里的 README.md",
-                                          size: 11, color: .secondaryLabelColor))
+        look.addArrangedSubview(skinButtons)
+        look.addArrangedSubview(note("自定义皮肤：将自包含的 HTML 文件放入皮肤目录，即出现在列表中。"))
 
-        // 皮肤自声明的设置项：控件按页面上报的 schema 生成，宿主不认识任何具体 id
-        controls.addArrangedSubview(spacer(6))
-        controls.addArrangedSubview(sectionTitle("皮肤设置"))
+        section(look, "皮肤选项")
         skinPrefsBox = NSStackView()
         skinPrefsBox.orientation = .vertical
         skinPrefsBox.alignment = .leading
         skinPrefsBox.spacing = 6
-        controls.addArrangedSubview(skinPrefsBox)
+        look.addArrangedSubview(skinPrefsBox)
         rebuildSkinPrefs()
 
-        // 3D 模型（hologram 皮肤的主体）
-        controls.addArrangedSubview(spacer(6))
-        controls.addArrangedSubview(sectionTitle("3D 模型（hologram 皮肤）"))
-        let modelRow = NSStackView()
-        modelRow.orientation = .horizontal
-        modelRow.spacing = 6
+        section(look, "3D 模型")
+        let modelRow = row()
         modelPopup = NSPopUpButton()
         modelPopup.target = self
         modelPopup.action = #selector(modelChanged(_:))
+        modelPopup.widthAnchor.constraint(lessThanOrEqualToConstant: 220).isActive = true
         rebuildModelPopup()
         modelRow.addArrangedSubview(modelPopup)
         for (title, sel) in [("打开模型目录", #selector(openModelsDir)), ("刷新列表", #selector(refreshModels))] {
-            let b = NSButton(title: title, target: self, action: sel)
-            b.bezelStyle = .rounded
-            b.controlSize = .small
-            b.font = .systemFont(ofSize: 11)
-            modelRow.addArrangedSubview(b)
+            modelRow.addArrangedSubview(smallButton(title, action: sel))
         }
-        controls.addArrangedSubview(modelRow)
-        controls.addArrangedSubview(label("把 .glb / .gltf / .fbx 放进模型目录即可选（glTF 含 Draco 压缩也行）；全息风格只用几何，材质贴图忽略",
-                                          size: 11, color: .secondaryLabelColor))
+        look.addArrangedSubview(modelRow)
+        look.addArrangedSubview(note("用于全息投影台等 3D 皮肤。支持 .glb / .gltf / .fbx，放入模型目录即可选择。"))
 
-        // 小工具槽位：装配台就在左侧真实预览上（overlay），这里只放引导说明
-        controls.addArrangedSubview(spacer(6))
-        controls.addArrangedSubview(sectionTitle("小工具槽位"))
-        controls.addArrangedSubview(wrappedLabel("在左侧预览上直接拖放：把卡片拖到预览九宫格的某个位置＝装配到该槽位，拖回预览下方的托盘＝移除，格子之间拖＝换位置。所见即所得，装配后预览与桌面同时生效。",
-                                                 size: 11, color: .secondaryLabelColor))
+        section(look, "小工具")
+        look.addArrangedSubview(note("在左侧预览上拖放：拖入九宫格即装配到该位置，拖回下方托盘即移除。"))
 
-        // 事件反应
-        controls.addArrangedSubview(spacer(6))
-        controls.addArrangedSubview(sectionTitle("事件反应"))
+        section(look, "事件反应")
         let flags = Prefs.reactionFlags
         for r in Prefs.reactions {
             let cb = NSButton(checkboxWithTitle: r.name, target: self, action: #selector(reactionToggled(_:)))
             cb.identifier = NSUserInterfaceItemIdentifier(r.id)
             cb.state = flags[r.id] == true ? .on : .off
             cb.font = .systemFont(ofSize: 12)
-            controls.addArrangedSubview(cb)
+            look.addArrangedSubview(cb)
         }
 
-        // 状态卡
-        controls.addArrangedSubview(spacer(6))
-        controls.addArrangedSubview(sectionTitle("状态卡"))
-        let float = NSButton(checkboxWithTitle: "置顶悬浮（盖在所有窗口之上，全屏 App 可见）",
+        section(look, "状态卡")
+        let float = NSButton(checkboxWithTitle: "置顶悬浮（显示在所有窗口之上）",
                              target: self, action: #selector(floatToggled(_:)))
         float.state = UserDefaults.standard.bool(forKey: "hudFloat") ? .on : .off
         float.font = .systemFont(ofSize: 12)
-        controls.addArrangedSubview(float)
-        let through = NSButton(checkboxWithTitle: "点击穿透（不拦截鼠标，也就不能直接拖动）",
+        look.addArrangedSubview(float)
+        let through = NSButton(checkboxWithTitle: "点击穿透（不响应鼠标，不可拖动）",
                                target: self, action: #selector(throughToggled(_:)))
         through.state = UserDefaults.standard.bool(forKey: "hudClickThrough") ? .on : .off
         through.font = .systemFont(ofSize: 12)
-        controls.addArrangedSubview(through)
-        controls.addArrangedSubview(label("位置：全局只有一张，直接用鼠标拖到想要的地方（可跨屏拖到任意一块显示器，记住最后放的那块屏）；右键状态卡可随时打开本设置",
-                                          size: 11, color: .secondaryLabelColor))
+        look.addArrangedSubview(through)
+        look.addArrangedSubview(note("拖动状态卡即可放置到任意位置（支持跨屏）。右键状态卡可打开本设置。"))
 
-
-        // 通用
-        controls.addArrangedSubview(spacer(6))
-        controls.addArrangedSubview(sectionTitle("通用"))
-        let auto = NSButton(checkboxWithTitle: "开机自启（登录时自动启动，launchd 保活，崩了自动拉起）",
-                            target: self, action: #selector(autostartToggled(_:)))
-        auto.state = Autostart.isEnabled ? .on : .off
-        auto.font = .systemFont(ofSize: 12)
-        controls.addArrangedSubview(auto)
-        controls.addArrangedSubview(wrappedLabel("开启只写一个 LaunchAgent（~/Library/LaunchAgents/），下次登录生效；与 ./ld autostart 等价",
-                                                 size: 11, color: .secondaryLabelColor))
-        let alertsCb = NSButton(checkboxWithTitle: "阈值通知：「等你输入」超时每次等待一次、额度跨 80% / 95% 各一次",
+        // ---------- 页 3：通知与启动
+        section(general, "通知", first: true)
+        let alertsCb = NSButton(checkboxWithTitle: "会话等待超时、或额度超过 80% / 95% 时发送系统通知",
                                 target: self, action: #selector(alertsToggled(_:)))
         alertsCb.state = Prefs.alertsEnabled ? .on : .off
         alertsCb.font = .systemFont(ofSize: 12)
-        controls.addArrangedSubview(alertsCb)
-        // 系统层面的授权状态：用户在系统弹框点了「不允许」，上面的勾选框再亮也一条都收不到——必须说出来并给出口
-        let notifRow = NSStackView()
-        notifRow.orientation = .horizontal
-        notifRow.spacing = 8
-        notifStatusLabel = label("…", size: 11, color: .secondaryLabelColor)
-        notifActionButton = NSButton(title: "打开系统设置", target: self, action: #selector(notifAction))
-        notifActionButton.bezelStyle = .rounded
-        notifActionButton.controlSize = .small
-        notifActionButton.font = .systemFont(ofSize: 11)
-        notifRow.addArrangedSubview(notifStatusLabel)
-        notifRow.addArrangedSubview(notifActionButton)
-        controls.addArrangedSubview(notifRow)
-        refreshNotificationRow()
-        let thRow = NSStackView()
-        thRow.orientation = .horizontal
-        thRow.spacing = 8
+        general.addArrangedSubview(alertsCb)
+        let thRow = row(); thRow.spacing = 8
         let thLabel = label("等待阈值", size: 12, color: .labelColor)
-        thLabel.widthAnchor.constraint(equalToConstant: 88).isActive = true
+        thLabel.widthAnchor.constraint(equalToConstant: 64).isActive = true
         let thPopup = NSPopUpButton()
         var minutes = Prefs.alertMinuteChoices
         if !minutes.contains(Prefs.alertWaitingMinutes) { minutes.append(Prefs.alertWaitingMinutes); minutes.sort() }
@@ -351,19 +312,38 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         thPopup.action = #selector(alertMinutesChanged(_:))
         thRow.addArrangedSubview(thLabel)
         thRow.addArrangedSubview(thPopup)
-        controls.addArrangedSubview(thRow)
-        controls.addArrangedSubview(wrappedLabel("不做常规状态播报——通知一旦变成噪音就会被关掉，长尾兜底也就没了（决策 003）",
-                                                 size: 11, color: .secondaryLabelColor))
+        general.addArrangedSubview(thRow)
+        // 系统层面的授权状态：用户在系统弹框点了「不允许」，上面的勾选再亮也一条都收不到——必须说出来并给出口
+        let notifRow = row(); notifRow.spacing = 8
+        notifStatusLabel = label("…", size: 11, color: .secondaryLabelColor)
+        notifActionButton = smallButton("打开系统设置", action: #selector(notifAction))
+        notifRow.addArrangedSubview(notifStatusLabel)
+        notifRow.addArrangedSubview(notifActionButton)
+        general.addArrangedSubview(notifRow)
+        refreshNotificationRow()
+        general.addArrangedSubview(note("每次等待仅通知一次，避免重复打扰。"))
+
+        section(general, "启动")
+        let auto = NSButton(checkboxWithTitle: "登录时自动启动 AIDeck",
+                            target: self, action: #selector(autostartToggled(_:)))
+        auto.state = Autostart.isEnabled ? .on : .off
+        auto.font = .systemFont(ofSize: 12)
+        general.addArrangedSubview(auto)
+        general.addArrangedSubview(note("下次登录生效；异常退出时自动重新启动。"))
+
+        showPage(0)
 
         // 右列的行一律禁止纵向压缩：否则空间不足时 autolayout 会把勾选框叠起来（而不是交给滚动）
-        controls.arrangedSubviews.forEach { $0.setContentCompressionResistancePriority(.required, for: .vertical) }
+        (controls.arrangedSubviews + pages.flatMap { $0.arrangedSubviews }).forEach {
+            $0.setContentCompressionResistancePriority(.required, for: .vertical)
+        }
         controls.setClippingResistancePriority(.required, for: .vertical)
 
         // 预览与**所在屏幕**同宽高比、吃满左列高度（多屏宽高比可能不同：窗口挪到哪块屏就按哪块屏换算，
         // 见 windowDidChangeScreen → applyPreviewAspect）。窗口尺寸全部用挂在 content 上的约束表达——
         // 首次显示时 AppKit 会按约束重算窗口尺寸（_changeWindowFrameFromConstraintsIfNecessary），
         // setContentSize 会被它覆盖，而 content 上的约束它是尊重的（见 issues.md 2026-08-27）
-        let scrollW = controls.fittingSize.width + 16     // +16：系统开「总是显示滚动条」时留出 legacy scroller
+        let scrollW = columnWidth + 16     // 列宽固定；+16：系统开「总是显示滚动条」时留出 legacy scroller
         scrollWidth = scrollW
         noteHeight = previewNote.fittingSize.height
         let pw = preview.widthAnchor.constraint(equalToConstant: 640)   // 初值随即被 applyPreviewAspect 覆盖
@@ -425,7 +405,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let skin = app?.currentAnimation ?? ""
         let schema = app?.skinSchema(for: skin) ?? []
         if schema.isEmpty {
-            box.addArrangedSubview(label("此皮肤没有声明设置项（皮肤可用 __ld.declarePrefs 声明，见皮肤目录 README）", size: 11, color: .secondaryLabelColor))
+            box.addArrangedSubview(note("当前皮肤没有可调选项。"))
             return
         }
         let saved = Prefs.skinValues(skin)
@@ -499,10 +479,31 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func sectionTitle(_ s: String) -> NSTextField {
-        let l = label(s, size: 12, color: .labelColor)
-        l.font = .systemFont(ofSize: 12, weight: .semibold)
+        let l = label(s, size: 13, color: .labelColor)
+        l.font = .systemFont(ofSize: 13, weight: .semibold)
         return l
     }
+
+    /// 一个区块的标题行：非首块前留间距。返回标题视图供深链接定位
+    @discardableResult
+    private func section(_ page: NSStackView, _ title: String, first: Bool = false) -> NSTextField {
+        if !first { page.addArrangedSubview(spacer(10)) }
+        let t = sectionTitle(title)
+        page.addArrangedSubview(t)
+        return t
+    }
+    private func note(_ s: String) -> NSTextField { wrappedLabel(s, size: 11, color: .secondaryLabelColor) }
+    private func row() -> NSStackView { let r = NSStackView(); r.orientation = .horizontal; r.spacing = 6; return r }
+
+    private func showPage(_ i: Int) {
+        for (k, p) in pages.enumerated() { p.isHidden = k != i }
+        pageTabs?.selectedSegment = i
+        scrollView?.contentView.scroll(to: .zero)
+        scrollView?.reflectScrolledClipView(scrollView.contentView)
+    }
+    @objc private func pageChanged(_ sender: NSSegmentedControl) { showPage(sender.selectedSegment) }
+    /// 外部切页（--settings <页码> 调试参数）
+    func selectPage(_ i: Int) { guard pages.indices.contains(i) else { return }; showPage(i) }
 
     private func label(_ s: String, size: CGFloat, color: NSColor) -> NSTextField {
         let l = NSTextField(labelWithString: s)
@@ -517,13 +518,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         return v
     }
 
-    /// 右列宽约 330，长句要能折行（labelWithString 是单行的，超宽会被截尾）
+    /// 折行文本按右列固定宽度折（labelWithString 是单行的，超宽会被截尾或把整列撑宽）
     private func wrappedLabel(_ s: String, size: CGFloat, color: NSColor) -> NSTextField {
         let l = NSTextField(wrappingLabelWithString: s)
         l.font = .systemFont(ofSize: size)
         l.textColor = color
         l.isSelectable = false
-        l.preferredMaxLayoutWidth = 320
+        l.preferredMaxLayoutWidth = columnWidth
         return l
     }
 

@@ -143,6 +143,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.showWelcome() }
         }
 
+        if let i = CommandLine.arguments.firstIndex(of: "--settings") {     // 调试：启动即开设置窗，可带页码（截图验证用）
+            let page = i + 1 < CommandLine.arguments.count ? Int(CommandLine.arguments[i + 1]) : nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                self?.openSettings()
+                if let page { self?.settings?.selectPage(page - 1) }
+            }
+        }
+
         if CommandLine.arguments.contains("--selftest") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 9) { [weak self] in
                 guard let u = self?.units.first else { return }
