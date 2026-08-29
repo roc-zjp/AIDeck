@@ -81,7 +81,7 @@ final class WelcomeWindowController: NSWindowController {
             ("gearshape", "设置入口",
              "右键状态卡，或通过菜单栏图标打开「设置」。状态卡入口在任何屏幕布局下均可用。"),
             ("link", "数据接入（可选）",
-             "额度显示与权限确认状态需接入 Claude Code 配置。接入前自动备份完整配置，可随时一键恢复。"),
+             "额度显示与权限确认状态需接入 Claude Code 配置，在「设置」首屏的「数据接入」区完成。接入前自动备份完整配置，可随时一键恢复。"),
             ("bell", "系统通知（可选）",
              "会话等待超过阈值或需要确认时发送系统通知。每次等待仅通知一次，可在设置中调整或关闭。"),
         ]
@@ -154,6 +154,6 @@ final class WelcomeWindowController: NSWindowController {
             engine.requestAuthorization { [weak self] in self?.refreshNotifButton() }
         }
     }
-    @objc private func settingsTapped() { app?.openSettings() }
+    @objc private func settingsTapped() { app?.revealSettings("quota") }   // 首次使用最先要配的是数据接入
     @objc private func closeTapped() { window?.close() }
 }

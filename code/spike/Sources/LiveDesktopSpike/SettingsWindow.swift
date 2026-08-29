@@ -16,6 +16,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var hooksStatusLabel: NSTextField!
     private var hooksActionButton: NSButton!
     private var hooksInstalled = false
+    private var scrollView: NSScrollView!
+    private var sectionAnchors: [String: NSView] = [:]     // 深链接：菜单 / 欢迎面板直达某区块
     private var quotaInstalled = false
     private var quotaTick = 0
     private var previewSizeConstraints: (w: NSLayoutConstraint, h: NSLayoutConstraint)?
@@ -50,6 +52,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         if quotaTick % 5 == 1 { refreshQuotaSection() }   // 5s 一刷：够跟上数据，又不必每秒读 settings.json
         if quotaTick % 5 == 3 { app?.alertEngine.refreshAuthorizationStatus { [weak self] in self?.refreshNotificationRow() } }  // 用户可能刚在系统设置里改了
         if quotaTick % 5 == 4 { refreshHooksSection() }
+    }
+
+    /// 把右列滚到某个区块顶部（菜单栏「点击接入」/ 欢迎面板深链接进来时用）。区块已在首屏时也无害
+    func reveal(_ section: String) {
+        guard let v = sectionAnchors[section], let doc = scrollView?.documentView else { return }
+        window?.layoutIfNeeded()
+        let y = max(0, v.convert(v.bounds, to: doc).minY - 8)
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: y))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
     /// 系统通知授权状态行：已允许 / 已拒绝（给「打开系统设置」）/ 尚未决定（给「请求授权」）
@@ -168,8 +179,44 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         scroll.drawsBackground = false
         scroll.documentView = doc
         content.addSubview(scroll)
+        scrollView = scroll
+
+        // 数据接入（首屏第一块）：首次使用最先要配的就是它——菜单栏「未接入 · 点击接入」与欢迎面板都直达这里。
+        // 以前排在第 7 块，不熟的用户点进设置停在「皮肤」，不知道往下翻（2026-08-29 用户实测反馈）
+        let quotaTitle = sectionTitle("数据接入 · 额度（五小时 / 七天用量）")
+        sectionAnchors["quota"] = quotaTitle
+        controls.addArrangedSubview(quotaTitle)
+        quotaStatusLabel = wrappedLabel("…", size: 12, color: .labelColor)
+        controls.addArrangedSubview(quotaStatusLabel)
+        let quotaButtons = NSStackView()
+        quotaButtons.orientation = .horizontal
+        quotaButtons.spacing = 6
+        quotaActionButton = smallButton("", action: #selector(quotaActionTapped))
+        quotaButtons.addArrangedSubview(quotaActionButton)
+        quotaButtons.addArrangedSubview(smallButton("打开数据目录", action: #selector(openQuotaDir)))
+        controls.addArrangedSubview(quotaButtons)
+        controls.addArrangedSubview(wrappedLabel("接入方式：将 ~/.claude/settings.json 的 statusLine 指向随附的透传程序，原状态栏命令原样执行、终端显示不变。接入前自动备份完整配置，可随时一键恢复。",
+                                                 size: 11, color: .secondaryLabelColor))
+        refreshQuotaSection()
+
+        controls.addArrangedSubview(spacer(6))
+        let hooksTitle = sectionTitle("数据接入 · 权限确认状态")
+        sectionAnchors["hooks"] = hooksTitle
+        controls.addArrangedSubview(hooksTitle)
+        hooksStatusLabel = wrappedLabel("…", size: 12, color: .labelColor)
+        controls.addArrangedSubview(hooksStatusLabel)
+        let hooksButtons = NSStackView()
+        hooksButtons.orientation = .horizontal
+        hooksButtons.spacing = 6
+        hooksActionButton = smallButton("", action: #selector(hooksActionTapped))
+        hooksButtons.addArrangedSubview(hooksActionButton)
+        controls.addArrangedSubview(hooksButtons)
+        controls.addArrangedSubview(wrappedLabel("接入方式：在 Claude Code 的 Notification hook 中登记随附的只读监听程序，会话等待权限确认或 MCP 表单时即可精确显示「等待确认」并即时通知。接入前自动备份完整配置，可随时撤销。注：此项以标准 JSON 重写整份 settings.json，键顺序可能改变、注释不保留。",
+                                                 size: 11, color: .secondaryLabelColor))
+        refreshHooksSection()
 
         // 皮肤：内置 + ~/.config/live-desktop/skins 里的自定义
+        controls.addArrangedSubview(spacer(6))
         controls.addArrangedSubview(sectionTitle("皮肤"))
         skinPopup = NSPopUpButton()
         skinPopup.target = self
@@ -256,36 +303,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         controls.addArrangedSubview(label("位置：全局只有一张，直接用鼠标拖到想要的地方（可跨屏拖到任意一块显示器，记住最后放的那块屏）；右键状态卡可随时打开本设置",
                                           size: 11, color: .secondaryLabelColor))
 
-        // Claude 额度（M3 收尾：QuotaInstaller 的 UI 壳，与 ./ld quota 同一套逻辑）
-        controls.addArrangedSubview(spacer(6))
-        controls.addArrangedSubview(sectionTitle("Claude 额度（五小时 / 七天用量）"))
-        quotaStatusLabel = wrappedLabel("…", size: 12, color: .labelColor)
-        controls.addArrangedSubview(quotaStatusLabel)
-        let quotaButtons = NSStackView()
-        quotaButtons.orientation = .horizontal
-        quotaButtons.spacing = 6
-        quotaActionButton = smallButton("", action: #selector(quotaActionTapped))
-        quotaButtons.addArrangedSubview(quotaActionButton)
-        quotaButtons.addArrangedSubview(smallButton("打开数据目录", action: #selector(openQuotaDir)))
-        controls.addArrangedSubview(quotaButtons)
-        controls.addArrangedSubview(wrappedLabel("接入只改 ~/.claude/settings.json 的 statusLine 一个键（改前整份备份），原状态栏命令原样透传、终端显示不变，可随时恢复",
-                                                 size: 11, color: .secondaryLabelColor))
-        refreshQuotaSection()
-
-        // 精细态（Notification hook，决策 009）：把「卡在确认框」从「在跑工具」里分出来
-        controls.addArrangedSubview(spacer(6))
-        controls.addArrangedSubview(sectionTitle("精细态（权限确认 / MCP 表单）"))
-        hooksStatusLabel = wrappedLabel("…", size: 12, color: .labelColor)
-        controls.addArrangedSubview(hooksStatusLabel)
-        let hooksButtons = NSStackView()
-        hooksButtons.orientation = .horizontal
-        hooksButtons.spacing = 6
-        hooksActionButton = smallButton("", action: #selector(hooksActionTapped))
-        hooksButtons.addArrangedSubview(hooksActionButton)
-        controls.addArrangedSubview(hooksButtons)
-        controls.addArrangedSubview(wrappedLabel("接入 ld-hook 到 Claude Code 的 Notification hook，把「卡在确认框等你点允许」从「在跑工具」里分出来——状态卡显示「等你确认」并即时提醒（不必等 5 分钟阈值）。改前整份备份，可随时撤掉。注意：与额度接入不同，这一步会用标准 JSON 重写整份 settings.json（键顺序可能变、JSONC 注释会丢），换来对已有其它 hooks 的用户也安全。",
-                                                 size: 11, color: .secondaryLabelColor))
-        refreshHooksSection()
 
         // 通用
         controls.addArrangedSubview(spacer(6))
@@ -598,7 +615,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         } else if st.hasRecord {
             text = "接入被顶掉：statusLine 现在是 \(st.currentCommand ?? "（未配置）")，额度数据不再更新，可重新接入"
         } else {
-            text = "未接入 · 桌面 POWER 面板与菜单栏额度行留空"
+            text = "未接入 · 接入后桌面能量环与菜单栏显示五小时 / 七天额度"
         }
         quotaStatusLabel.stringValue = text
         quotaActionButton.title = quotaInstalled ? "恢复原状态栏…" : "接入…"
@@ -646,11 +663,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let st = HooksInstaller.inspect()
         hooksInstalled = st.installed
         if st.installed {
-            hooksStatusLabel.stringValue = "已接入 · 权限确认 / MCP 表单会显示为「等你确认」并即时提醒"
+            hooksStatusLabel.stringValue = "已接入 · 权限确认 / MCP 表单显示为「等待确认」并即时通知"
         } else if let other = st.otherCommand {
             hooksStatusLabel.stringValue = "接入路径不一致：Notification hook 指向 \(other)，重新接入即可修正"
         } else {
-            hooksStatusLabel.stringValue = "未接入 · 权限确认目前只能靠「停滞」在半小时后兜底"
+            hooksStatusLabel.stringValue = "未接入 · 接入后可精确显示「等待确认」状态并即时通知"
         }
         hooksActionButton.title = hooksInstalled ? "撤掉…" : "接入…"
     }

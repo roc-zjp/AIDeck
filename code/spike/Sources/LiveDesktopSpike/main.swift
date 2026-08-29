@@ -658,11 +658,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // 没数据也不藏这一行：未接入给入口，已接入说明还在等数据（menuNeedsUpdate 只在开菜单时跑，读一次配置无妨）
             let st = QuotaInstaller.inspect()
             let title: String
-            if st.installed     { title = "额度：已接入，等 Claude Code 刷新状态栏出数" }
-            else if st.hasRecord { title = "额度：接入被顶掉 · 点击打开设置处理" }
-            else                { title = "额度：未接入 · 点击打开设置接入" }
+            if st.installed     { title = "额度：已接入，等待 Claude Code 刷新状态栏" }
+            else if st.hasRecord { title = "额度：接入已失效 · 点击处理" }
+            else                { title = "额度：未接入 · 点击接入" }
             let it = NSMenuItem(title: title,
-                                action: st.installed ? nil : #selector(openSettings), keyEquivalent: "")
+                                action: st.installed ? nil : #selector(openSettingsForQuota), keyEquivalent: "")
+            it.target = self
+            menu.addItem(it)
+        }
+        // 权限确认状态同理：未接入时给直达入口（menuNeedsUpdate 只在开菜单时跑，读一次配置无妨）
+        if !HooksInstaller.inspect().installed {
+            let it = NSMenuItem(title: "权限确认状态：未接入 · 点击接入", action: #selector(openSettingsForHooks), keyEquivalent: "")
             it.target = self
             menu.addItem(it)
         }
@@ -797,6 +803,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settings?.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
+
+    /// 深链接：打开设置并滚到某区块（菜单栏「点击接入」/ 欢迎面板用）。不与 openSettings 同名——#selector(openSettings) 会二义
+    func revealSettings(_ section: String) {
+        openSettings()
+        settings?.reveal(section)
+    }
+    @objc func openSettingsForQuota() { revealSettings("quota") }
+    @objc func openSettingsForHooks() { revealSettings("hooks") }
 
     func settingsClosed() { settings = nil }
 
