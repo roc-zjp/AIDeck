@@ -20,20 +20,26 @@ ln -s /Applications "$STAGE/Applications"
 if [ "$SIGN_TAG" = "adhoc" ]; then
   # 内测说明：ad-hoc 签名没过公证，收件人第一次打开必须绕 Gatekeeper
   cat > "$STAGE/内测说明.txt" <<'TXT'
-AIDeck 内测包（ad-hoc 签名，未公证）
+AIDeck 内测版
 
-安装：把 AIDeck 拖到 Applications。
+安装
+  将 AIDeck 拖入 Applications 文件夹。
 
-第一次打开会被 macOS 拦（"无法打开，因为无法验证开发者"）——这是签名类型导致的，不是坏了：
-  · 方法一：在 Applications 里右键 AIDeck → 打开 → 再点「打开」
-  · 方法二：双击被拦后，去 系统设置 → 隐私与安全性 → 底部点「仍要打开」
-只需一次，以后正常双击。
+首次打开
+  本版本为内测签名，未经 Apple 公证，首次打开时 macOS 会提示"无法验证开发者"。
+  请在 Applications 中右键点击 AIDeck，选择「打开」，再次确认即可；此后可正常双击启动。
+  或：系统设置 → 隐私与安全性 → 点击「仍要打开」。
 
-它是菜单栏 App，没有 Dock 图标：首次启动会弹一个欢迎面板介绍入口；关掉后看菜单栏彩色圆盘，
-或右键桌面上的状态卡打开设置。刘海屏菜单栏图标可能被挤掉——右键状态卡是永远可用的入口。
+使用
+  AIDeck 是菜单栏应用，不在 Dock 中显示。首次启动将显示引导面板。
+  · 状态卡：桌面上的会话状态面板，右键可打开设置
+  · 菜单栏图标：颜色随会话状态变化，点击查看详情与设置
+  在刘海屏上菜单栏图标可能被系统隐藏，状态卡入口始终可用。
 
-需要 Claude Code 在跑才有数据。额度 / 精细态两项接入会改 ~/.claude/settings.json（改前整份备份、可一键恢复），
-都在设置页里点，没点就不会碰。
+数据来源
+  AIDeck 读取本机 Claude Code 的会话记录，Claude Code 运行中才有数据。
+  额度显示与权限确认状态为可选接入，需修改 Claude Code 配置（~/.claude/settings.json）；
+  接入前自动备份完整配置，可在设置中一键恢复。未接入时不会修改任何配置。
 TXT
 fi
 
