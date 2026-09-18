@@ -276,17 +276,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         }
 
         section(look, "状态卡")
-        let float = NSButton(checkboxWithTitle: "置顶悬浮（显示在所有窗口之上）",
+        let autoFloat = NSButton(checkboxWithTitle: "有会话等你时自动浮现，回复后收回",
+                                 target: self, action: #selector(autoFloatToggled(_:)))
+        autoFloat.state = Prefs.hudAutoFloat ? .on : .off
+        autoFloat.font = .systemFont(ofSize: 12)
+        look.addArrangedSubview(autoFloat)
+        let float = NSButton(checkboxWithTitle: "置顶悬浮（始终显示在所有窗口之上）",
                              target: self, action: #selector(floatToggled(_:)))
-        float.state = UserDefaults.standard.bool(forKey: "hudFloat") ? .on : .off
+        float.state = Prefs.hudFloat ? .on : .off
         float.font = .systemFont(ofSize: 12)
         look.addArrangedSubview(float)
         let through = NSButton(checkboxWithTitle: "点击穿透（不响应鼠标，不可拖动）",
                                target: self, action: #selector(throughToggled(_:)))
-        through.state = UserDefaults.standard.bool(forKey: "hudClickThrough") ? .on : .off
+        through.state = Prefs.hudClickThrough ? .on : .off
         through.font = .systemFont(ofSize: 12)
         look.addArrangedSubview(through)
-        look.addArrangedSubview(note("拖动状态卡即可放置到任意位置（支持跨屏）。右键状态卡可打开本设置。"))
+        look.addArrangedSubview(note("拖动状态卡即可放置到任意位置（支持跨屏）；有会话等待时，单击状态卡可直达对应终端。右键状态卡可打开本设置。"))
 
         // ---------- 页 3：通知与启动
         section(general, "通知", first: true)
@@ -585,6 +590,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func floatToggled(_ sender: NSButton) {
         app?.setHudFloat(sender.state == .on)
+    }
+
+    @objc private func autoFloatToggled(_ sender: NSButton) {
+        app?.setHudAutoFloat(sender.state == .on)    // 关掉时立即收回，不等下一拍
     }
 
     @objc private func throughToggled(_ sender: NSButton) {

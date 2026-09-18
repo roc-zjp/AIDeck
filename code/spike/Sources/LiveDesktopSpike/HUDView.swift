@@ -224,6 +224,17 @@ final class HUDView: NSView {
         blur.layer?.borderColor = NSColor(white: 1, alpha: on ? 0.30 : 0.14).cgColor
     }
 
+    /// 按需浮现的瞬间边框闪一次琥珀色（决策 011）：回答「卡片为什么突然出现」，随即淡回常态
+    func flashAttention() {
+        guard let l = blur.layer else { return }
+        let a = CABasicAnimation(keyPath: "borderColor")
+        a.fromValue = HUDView.accent(.waiting).withAlphaComponent(0.9).cgColor
+        a.toValue = l.borderColor
+        a.duration = 1.2
+        a.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        l.add(a, forKey: "attentionFlash")
+    }
+
     // MARK: - 尺寸与布局
 
     /// 身份标的实际宽度：带 kern 的属性字符串，intrinsicContentSize 不把字距算进去，会把 "CODE" 截掉

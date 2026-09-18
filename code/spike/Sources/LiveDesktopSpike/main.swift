@@ -53,28 +53,26 @@ final class ScreenUnit {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     private var units: [ScreenUnit] = []
     /// 状态卡全局唯一一张（决策 010）：独立成窗、挂图标层之上、原生绘制；生命周期与显示器无关，
     /// 住在用户最后放它的那块屏（hudScreen），那块屏不在时临时落到主屏，插回即归位
-    private let hudWindow = HUDWindow()
-    private let hudView = HUDView(frame: CGRect(x: 0, y: 0, width: 260, height: 100))
-    private var hudSize = CGSize(width: 232, height: 86)
-    private var statusItem: NSStatusItem!
+    private lazy var hud = HUDController(onOpenSettings: { [weak self] in self?.openSettings() })
+    private var statusBar: StatusItemController?
     private let probe = ClaudeStateProbe()
     private let quotaProbe = QuotaProbe()
     private let systemProbe = SystemProbe()
     private let alerts = AlertEngine()
     private var timer: Timer?
     private var state = ClaudeState()
-    private var animation = UserDefaults.standard.string(forKey: "animation") ?? "jarvis.html"
+    private var animation = Prefs.animation
     private var manuallyPaused = false
 
     // 诊断
     private var lastCoverage: Double = 0
     private var lastOccluded = false
     private var coverageMillis: Double = 0
-    private var diagHandle: FileHandle?
+    private var diag: DiagLogger?
     private var lastVis = "?"
     private var lastFrames = 0
     private var prevFrames = 0
@@ -95,11 +93,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 旁听桌面上的左键点击（全局监视器只"看"发给别的 App 的事件，不拦截；我们的窗口本来就点击穿透，点击照常落到 Finder）
         NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in self?.pushMouse(NSEvent.mouseLocation, down: true) }
         ModelServer.ensureUserModelsDir()                                                     // 自定义 3D 模型目录
-        setupHUD()
+        hud.layout()
         reconcileScreens()
         installMouseTracking()
-        buildStatusItem()
-        if logDiagnostics { openDiagLog() }
+        buildStatusBar()
+        if logDiagnostics { diag = DiagLogger(); diag?.open() }
 
         NotificationCenter.default.addObserver(
             self, selector: #selector(screenParametersDidChange),
@@ -138,8 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         tick()
 
         // 首启引导：第一次运行弹一次欢迎面板（介绍入口 + 通知授权）。老用户升级也会看到一次，无妨
-        if !UserDefaults.standard.bool(forKey: "didLaunchBefore") {
-            UserDefaults.standard.set(true, forKey: "didLaunchBefore")
+        if Prefs.consumeFirstLaunch() {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.showWelcome() }
         }
 
@@ -163,10 +160,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 FileHandle.standardError.write("[selftest 工具流] \(tl)\n".data(using: .utf8)!)
                 let ss = self?.state.sessions.map { "\($0.name ?? $0.project)[\($0.kind)]/\($0.parked ? "parked" : $0.stalled ? "stalled" : $0.phase.rawValue)/\($0.tool ?? "-")/\($0.idleSeconds)s" }.joined(separator: "  ") ?? ""
                 FileHandle.standardError.write("[selftest 会话] 全局=\(self?.state.phase.rawValue ?? "?")  \(ss)\n".data(using: .utf8)!)
-                if let self, let home = self.hudHomeScreen() {
-                    let f = self.hudWindow.frame
-                    FileHandle.standardError.write(
-                        "[selftest HUD窗] 家屏\(ScreenUnit.displayID(of: home)) 窗口=\(Int(f.width))x\(Int(f.height)) @\(Int(f.minX)),\(Int(f.minY)) 屏内偏移=\(Int(f.minX - home.frame.minX)),\(Int(f.minY - home.frame.minY)) 显示器=\(NSScreen.screens.count) 状态卡窗口数=\(NSApp.windows.filter { $0 is HUDWindow }.count)\n".data(using: .utf8)!)
+                if let line = self?.hud.selftestLine() {
+                    FileHandle.standardError.write((line + "\n").data(using: .utf8)!)
                 }
             }
         }
@@ -184,11 +179,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// 注销 / 关机 / 菜单退出：把该关的关掉。以前没有这一步，diag.csv 最后一行可能被截断，WebContent 全靠系统回收
     func applicationWillTerminate(_ n: Notification) {
-        try? diagHandle?.close()
-        diagHandle = nil
+        diag?.close()
+        diag = nil
         units.forEach { $0.tearDown() }
         units.removeAll()
-        hudWindow.close()
+        hud.close()
     }
 
     /// 快速用户切换到别的账户后，我们的窗口留在后台登录会话里，occlusionState 未必判不可见——按 CGSession 的 on-console 位兜底。
@@ -245,131 +240,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             FileHandle.standardError.write("[screens] 显示器 \(screens.count) 个：新建 \(created) 下线 \(gone.count)\n".data(using: .utf8)!)
         }
         // 状态卡的家屏可能刚拔掉（临时落主屏）或刚插回（归位）；拖动中 / 编辑中不重排，否则会把卡从用户手里拽走
-        if dragOffset == nil && !hudEditing { layoutHUD() }
+        hud.relayoutIfIdle()
     }
 
     // MARK: - 每秒一拍：探测状态 + 决定是否渲染
 
-    // MARK: - HUD 定位（现在是窗口定位，不再是页面内 CSS 定位）
+    // MARK: - 鼠标轮询（状态卡交互 + 被动输入感知共用这一条 30Hz 轮询）
 
-    private var hudEditing = false
-    private var hudEditTimer: Timer?
-    private var hudMoveObserver: Any?
+    private var mouseTimer: Timer?
 
-    private func setupHUD() {
-        hudView.autoresizingMask = [.width, .height]
-        hudWindow.contentView = hudView
-        hudWindow.setFloating(UserDefaults.standard.bool(forKey: "hudFloat"))
-        hudWindow.setClickThrough(UserDefaults.standard.bool(forKey: "hudClickThrough"))
-        hudWindow.orderFront(nil)
-    }
-
-    private func pushHudState() {
-        hudView.update(state)
-        let newSize = hudView.cardSize
-        guard newSize != hudSize else { return }
-        hudSize = newSize
-        // 拖动中只改尺寸不动位置，否则会把窗口从用户手里拽走
-        if dragOffset != nil || hudEditing {
-            hudWindow.setContentSize(newSize)
-        } else {
-            layoutHUD()
-        }
-    }
-
-    private var dragTimer: Timer?
-    private var wasPressed = false
-    private var dragOffset: CGSize?
-    private var loggedFirstHit = false
-
-    /// 状态卡的家屏：用户最后把它放在哪块屏（hudScreen 存 displayID）。没存过、或那块屏此刻不在，落到主屏
-    /// （NSScreen.screens.first 是带菜单栏的主显示器，不随键盘焦点变）。家屏拔掉时不改写 hudScreen，插回即归位
-    private func hudHomeScreen() -> NSScreen? {
-        let screens = NSScreen.screens
-        if let v = UserDefaults.standard.object(forKey: "hudScreen"), let id = Self.num(v),
-           let s = screens.first(where: { Double(ScreenUnit.displayID(of: $0)) == id }) { return s }
-        return screens.first
-    }
-
-    /// 位置 = 家屏 + 屏内偏移（hudOffset，相对家屏原点），改分辨率 / 重排屏幕后仍落在同一块屏的同一位置；
-    /// 没有自由位置就按 hudAnchor 吸附家屏四角。最后夹回屏内，避免家屏换成更小的屏后跑到看不见的地方
-    private func layoutHUD() {
-        guard let screen = hudHomeScreen() else { return }
-        let d = UserDefaults.standard
-        let size = hudSize
-        var origin: CGPoint
-        // 宽容解析：runtime 存的是数字，手工 defaults write 进来的是字符串，都认
-        if let arr = d.array(forKey: "hudOffset"), arr.count == 2,
-           let dx = Self.num(arr[0]), let dy = Self.num(arr[1]) {
-            origin = CGPoint(x: screen.frame.minX + dx, y: screen.frame.minY + dy)
-        } else if let legacy = legacyHudOrigin(on: screen) {
-            origin = legacy
-        } else {
-            origin = anchorOrigin(d.string(forKey: "hudAnchor") ?? "br", screen, size)
-        }
-        hudWindow.setFrame(CGRect(origin: clampToScreen(origin, size: size, screen: screen), size: size), display: true)
-    }
-
-    /// 决策 010 之前每屏一张、按 displayID 各存偏移（hudPositions），更早只有主屏绝对坐标（hudX/hudY）。
-    /// 升级后取家屏名下那份沿用；保存过一次新格式就清掉旧键，不再走这里
-    private func legacyHudOrigin(on screen: NSScreen) -> CGPoint? {
-        let d = UserDefaults.standard
-        if let saved = d.dictionary(forKey: "hudPositions"),
-           let arr = saved[String(ScreenUnit.displayID(of: screen))] as? [Any], arr.count == 2,
-           let dx = Self.num(arr[0]), let dy = Self.num(arr[1]) {
-            return CGPoint(x: screen.frame.minX + dx, y: screen.frame.minY + dy)
-        }
-        if d.object(forKey: "hudX") != nil { return CGPoint(x: d.double(forKey: "hudX"), y: d.double(forKey: "hudY")) }
-        return nil
-    }
-
-    private static func num(_ v: Any) -> Double? {
-        (v as? NSNumber)?.doubleValue ?? Double(v as? String ?? "")
-    }
-
-    /// 松手 / 编辑结束：卡现在压在哪块屏（NSWindow.screen = 重叠最多的那块），就把那块屏记成家屏，并存屏内偏移
-    private func saveHudPosition() {
-        guard let screen = hudWindow.screen ?? hudHomeScreen() else { return }
-        let f = hudWindow.frame
-        let id = ScreenUnit.displayID(of: screen)
-        let d = UserDefaults.standard
-        d.set(Int(id), forKey: "hudScreen")
-        d.set([Double(f.minX - screen.frame.minX), Double(f.minY - screen.frame.minY)], forKey: "hudOffset")
-        d.removeObject(forKey: "hudPositions"); d.removeObject(forKey: "hudX"); d.removeObject(forKey: "hudY")
-        FileHandle.standardError.write("[hud] 位置已保存 家屏\(id) 偏移 \(Int(f.minX - screen.frame.minX)),\(Int(f.minY - screen.frame.minY))\n".data(using: .utf8)!)
-    }
-
-    /// 不允许把卡片拖出屏幕 —— 拖丢了就再也找不回来
-    private func clampToScreen(_ p: CGPoint, size: CGSize, screen: NSScreen) -> CGPoint {
-        let vf = screen.visibleFrame
-        return CGPoint(x: min(max(p.x, vf.minX), max(vf.minX, vf.maxX - size.width)),
-                       y: min(max(p.y, vf.minY), max(vf.minY, vf.maxY - size.height)))
-    }
-
-    private func anchorOrigin(_ anchor: String, _ screen: NSScreen, _ size: CGSize) -> CGPoint {
-        let m: CGFloat = 24
-        let f = screen.visibleFrame     // 用 visibleFrame 自动避开菜单栏与 Dock
-        let v = anchor.first ?? "b", h = anchor.last ?? "r"
-        let x: CGFloat = h == "l" ? f.minX + m : (h == "r" ? f.maxX - size.width - m : f.midX - size.width / 2)
-        let y: CGFloat = v == "b" ? f.minY + m : (v == "t" ? f.maxY - size.height - m : f.midY - size.height / 2)
-        return CGPoint(x: x, y: y)
-    }
-
-    /// 轮询鼠标状态驱动拖动。
     /// 桌面层窗口收不到常规鼠标事件；而 addGlobalMonitorForEvents 在未取得输入监听权限时
     /// 同样一个事件都收不到。NSEvent.mouseLocation / pressedMouseButtons 是静态属性，
     /// 读取不需要任何权限，因此这是此处唯一稳妥的路子。
+    /// 采到的位置分两路：状态卡交互（HUDController）与推给皮肤页面的被动感知（决策 006）。
     private func installMouseTracking() {
         let trusted = AXIsProcessTrusted()
         FileHandle.standardError.write("[mouse] 轮询已启动，辅助功能权限=\(trusted)（本方案不依赖它）\n".data(using: .utf8)!)
         let t = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
-            self?.pollMouse()
+            guard let self else { return }
+            let p = NSEvent.mouseLocation
+            self.hud.handleMouse(at: p,
+                                 leftDown: (NSEvent.pressedMouseButtons & 1) != 0,
+                                 rightDown: (NSEvent.pressedMouseButtons & 2) != 0)
+            self.pushMouse(p, down: false)
         }
         RunLoop.main.add(t, forMode: .common)
-        dragTimer = t
+        mouseTimer = t
     }
-
-    private var wasRightPressed = false
 
     /// 把全局鼠标位置换算成"光标所在屏"的页面坐标推给该屏页面；其他屏推一次 nil。只推给闸门开着（真在渲染）的屏——
     /// 桌面被盖住时页面看不见也不跑帧，推了白耗电。这是被动感知：不改窗口层级、不接管任何事件（决策 006）
@@ -381,92 +278,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func pollMouse() {
-        let pressed = (NSEvent.pressedMouseButtons & 1) != 0
-        let rightPressed = (NSEvent.pressedMouseButtons & 2) != 0
-        let p = NSEvent.mouseLocation
-        defer { wasPressed = pressed; wasRightPressed = rightPressed }
-        pushMouse(p, down: false)
-
-        // 右键状态卡 → 打开设置。菜单栏在刘海屏上可能被挤掉，状态卡是唯一一直看得见的入口
-        if rightPressed && !wasRightPressed, hudWindow.frame.contains(p) {
-            openSettings()
-            return
-        }
-
-        if pressed && !wasPressed {                       // 刚按下：命中状态卡
-            guard !UserDefaults.standard.bool(forKey: "hudClickThrough") else { return }
-            guard hudWindow.frame.contains(p) else { return }
-            let f = hudWindow.frame
-            dragOffset = CGSize(width: p.x - f.minX, height: p.y - f.minY)
-            hudView.setDragging(true)
-            if !loggedFirstHit {
-                loggedFirstHit = true
-                FileHandle.standardError.write("[mouse] 命中状态卡，开始拖动\n".data(using: .utf8)!)
-            }
-        } else if pressed, let off = dragOffset {          // 拖动中：光标在哪块屏就夹在哪块屏内——卡跟着光标跨屏，但不会卡在两屏之间的缝里
-            let target = NSScreen.screens.first(where: { $0.frame.contains(p) }) ?? hudWindow.screen ?? NSScreen.screens.first
-            if let s = target {
-                hudWindow.setFrameOrigin(clampToScreen(CGPoint(x: p.x - off.width, y: p.y - off.height),
-                                                       size: hudWindow.frame.size, screen: s))
-            }
-        } else if !pressed, dragOffset != nil {            // 松手：卡压在哪块屏就记哪块屏为家
-            hudView.setDragging(false)
-            saveHudPosition()
-            dragOffset = nil
-        }
-    }
-
-    func setClickThrough(_ on: Bool) {
-        UserDefaults.standard.set(on, forKey: "hudClickThrough")
-        hudWindow.setClickThrough(on)
-    }
-
-    /// 状态卡置顶悬浮：全局状态指引，不该只在桌面露出时才看得见
-    func setHudFloat(_ on: Bool) {
-        UserDefaults.standard.set(on, forKey: "hudFloat")
-        hudWindow.setFloating(on)
-        FileHandle.standardError.write("[hud] 置顶悬浮 \(on ? "开" : "关")\n".data(using: .utf8)!)
-    }
-
-    private func startHudEdit() {
-        guard !hudEditing else { return }
-        hudEditing = true
-        hudWindow.setEditing(true); hudView.setDragging(true)
-        hudMoveObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.didMoveNotification, object: hudWindow, queue: .main
-        ) { [weak self] _ in
-            self?.scheduleHudEditFinish(1.5)                       // 松手静止 1.5s 即保存
-        }
-        scheduleHudEditFinish(20)                                  // 完全没动则 20s 自动退出
-    }
-
-    private func scheduleHudEditFinish(_ delay: TimeInterval) {
-        hudEditTimer?.invalidate()
-        hudEditTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-            self?.finishHudEdit()
-        }
-    }
-
-    private func finishHudEdit() {
-        guard hudEditing else { return }
-        hudEditing = false
-        hudEditTimer?.invalidate(); hudEditTimer = nil
-        if let o = hudMoveObserver { NotificationCenter.default.removeObserver(o); hudMoveObserver = nil }
-        saveHudPosition()
-        hudWindow.setEditing(false)
-        hudView.setDragging(false)
-        layoutHUD()
-    }
-
-    /// 吸附四角 = 清掉自由位置；卡留在当前家屏（hudScreen 不动），四角指的是家屏的四角
-    private func setHudAnchor(_ a: String) {
-        let d = UserDefaults.standard
-        d.removeObject(forKey: "hudX"); d.removeObject(forKey: "hudY"); d.removeObject(forKey: "hudPositions")
-        d.removeObject(forKey: "hudOffset")
-        d.set(a, forKey: "hudAnchor")
-        layoutHUD()
-    }
+    // 状态卡的对外入口（菜单栏 / 设置页 / ./ld 命令共用），实现都在 HUDController
+    func setClickThrough(_ on: Bool) { hud.setClickThrough(on) }
+    func setHudFloat(_ on: Bool) { hud.setFloating(on) }
+    func setHudAutoFloat(_ on: Bool) { hud.setAutoFloat(on) }
 
     // MARK: - 控制文件（菜单栏在刘海屏可能不可用，命令行必须能全权控制）
 
@@ -482,12 +297,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case "hud":
                 let arg = parts.count > 1 ? parts[1] : "br"
                 switch arg {
-                case "edit":    startHudEdit()
+                case "edit":    hud.beginEdit()
                 case "through": setClickThrough(true)
                 case "drag":    setClickThrough(false)
                 case "float":   setHudFloat(true)
                 case "desktop": setHudFloat(false)
-                default:        setHudAnchor(arg)
+                case "auto":    if parts.count > 2 { setHudAutoFloat(parts[2] == "on") }
+                default:        hud.setAnchor(arg)
                 }
             case "celebrate":   // 手动触发一次庆祝动作（预览），转给所有屏的动画页面
                 for u in units { u.host.webView.evaluateJavaScript("window.__ldCelebrate&&window.__ldCelebrate()") }
@@ -526,7 +342,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastCoverage = cov.max() ?? 0
 
         let onConsole = Self.sessionOnConsole
-        pushHudState()
+        hud.update(state)
         for (i, unit) in units.enumerated() {
             unit.host.push(state: state)
             let occluded = !unit.window.occlusionState.contains(.visible)
@@ -550,8 +366,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.prevFrames = self.lastFrames
             self.lastFrames = d["frames"] as? Int ?? 0
         }
-        updateStatusIcon()
+        statusBar?.updateIcon(state)
         if logDiagnostics { writeDiagLine() }
+    }
+
+    // MARK: - 菜单栏（构建在 StatusItemController，这里只提供一份只读快照）
+
+    private func buildStatusBar() {
+        statusBar = StatusItemController(target: self) { [weak self] in
+            guard let self else { return StatusItemController.Context(
+                state: ClaudeState(), animations: [], currentAnimation: "", rendering: false, fps: 0,
+                occluded: false, coverage: 0, coverageMillis: 0, onBattery: false, paused: false) }
+            return StatusItemController.Context(
+                state: self.state,
+                animations: self.units.first?.host.availableAnimations ?? [],
+                currentAnimation: self.animation,
+                rendering: self.units.first?.rendering == true,
+                fps: self.units.first?.host.reportedFPS ?? 0,
+                occluded: self.lastOccluded,
+                coverage: self.lastCoverage,
+                coverageMillis: self.coverageMillis,
+                onBattery: self.onBattery,
+                paused: self.manuallyPaused)
+        }
     }
 
     // MARK: - 电源
@@ -568,211 +405,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return false
     }
 
-    // MARK: - 菜单栏
-
-    private func buildStatusItem() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)   // 要放得下等待数
-        statusItem.isVisible = true
-        let menu = NSMenu()
-        menu.delegate = self
-        statusItem.menu = menu
-        updateStatusIcon()
-
-        // 刘海屏菜单栏挤爆时系统会静默隐藏图标，这里把真实位置打出来便于判断
-        if let w = statusItem.button?.window {
-            let f = w.frame
-            let msg = "[status] button=yes visible=\(statusItem.isVisible) frame=\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height)) 屏宽=\(Int(NSScreen.main?.frame.width ?? 0))\n"
-            FileHandle.standardError.write(msg.data(using: .utf8)!)
-        } else {
-            FileHandle.standardError.write("[status] button 为 nil —— 菜单栏项未能创建\n".data(using: .utf8)!)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            guard let self, let b = self.statusItem?.button, let w = b.window else { return }
-            let f = w.frame
-            let msg = "[status+3s] frame=\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height)) image=\(b.image != nil) visible=\(self.statusItem.isVisible)\n"
-            FileHandle.standardError.write(msg.data(using: .utf8)!)
-        }
-    }
-
-    /// 菜单栏图标：自绘实色圆盘（阶段色）+ 反应堆式内环与核心，**非模板图**，任何菜单栏外观下都是一块彩色。
-    /// 有会话在等你时，圆盘右侧直接显示等待数（橙色）——真实数据，也是菜单栏最该喊出来的一件事。
-    /// 早先用 SF Symbol 模板图（15pt 细线、随阶段换形状），在十几个系统图标里根本认不出是谁的
-    private func updateStatusIcon() {
-        guard let b = statusItem?.button else { return }
-        let color: NSColor = state.phase == .idle ? NSColor(white: 0.62, alpha: 1) : HUDView.accent(state.phase)
-        let waiting = state.sessions.filter { $0.phase == .waiting }.count
-        // 等待数直接画进同一张图：按钮自己排图 + 文字时基线对不齐，只有画在一起才能保证与圆盘垂直居中
-        let badge: NSAttributedString? = waiting > 0 ? NSAttributedString(
-            string: "\(waiting)",
-            attributes: [.font: NSFont.systemFont(ofSize: 12.5, weight: .bold),
-                         .foregroundColor: HUDView.accent(.waiting)]) : nil
-        let badgeW = badge.map { ceil($0.size().width) + 4 } ?? 0
-        let h: CGFloat = 18
-        let img = NSImage(size: NSSize(width: h + badgeW, height: h), flipped: false) { rect in
-            let disc = CGRect(x: 1, y: 1, width: h - 2, height: h - 2)
-            color.setFill()
-            NSBezierPath(ovalIn: disc).fill()
-            // 反应堆：深色内环 + 核心
-            let ink = NSColor(white: 0.08, alpha: 0.85)
-            ink.setStroke()
-            let ring = NSBezierPath(ovalIn: disc.insetBy(dx: 4, dy: 4))
-            ring.lineWidth = 1.6
-            ring.stroke()
-            ink.setFill()
-            NSBezierPath(ovalIn: disc.insetBy(dx: 6.6, dy: 6.6)).fill()
-            if let badge {
-                let sz = badge.size()
-                // 数字的视觉中心比排版框中心略低（数字没有下伸部），上抬 0.5 让它与圆盘居中
-                badge.draw(at: CGPoint(x: h + 3, y: (h - sz.height) / 2 + 0.5))
-            }
-            return true
-        }
-        img.isTemplate = false
-        b.image = img
-        b.imagePosition = .imageOnly
-        b.title = ""
-        b.toolTip = "AIDeck · \(waiting > 0 ? "\(waiting) 个会话等你输入" : "Claude Code 状态")"
-    }
-
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.removeAllItems()
-        let phaseLabel: [ClaudePhase: String] = [
-            .idle: "空闲", .waiting: "等你输入", .thinking: "思考中", .running: "执行工具"
-        ]
-        var head = "Claude：\(phaseLabel[state.phase] ?? "?")"
-        if let t = state.tool { head += " · \(t)" }
-        if let p = state.name ?? state.project { head += " · \(p)" }
-        if !state.claudeDetected && state.sessions.isEmpty { head = "未检测到 Claude Code 会话记录（~/.claude 下没有 sessions / projects）" }
-        menu.addItem(NSMenuItem(title: head, action: nil, keyEquivalent: ""))
-        // 第二行把菜单栏图标旁那个数字解释清楚：它就是等你输入的会话数
-        let waitingCount = state.sessions.filter { $0.phase == .waiting }.count
-        menu.addItem(NSMenuItem(title: "活跃会话 \(state.sessions.count) 个" + (waitingCount > 0 ? " · \(waitingCount) 个等你输入（图标旁的数字）" : ""),
-                                action: nil, keyEquivalent: ""))
-        // 每个会话一行：等你输入的排最前
-        let order: [ClaudePhase: Int] = [.waiting: 0, .running: 1, .thinking: 2, .idle: 3]
-        for s in state.sessions.sorted(by: { (order[$0.phase] ?? 9, $0.kind == "bg" ? 1 : 0) < (order[$1.phase] ?? 9, $1.kind == "bg" ? 1 : 0) }) {
-            var name = (s.nameIsUserSet ? s.name : nil) ?? s.project
-            if s.kind == "bg" { name += "（后台）" }
-            menu.addItem(NSMenuItem(title: "   \(name)  —  \(HUDView.statusText(s))", action: nil, keyEquivalent: ""))
-        }
-        if let q = state.quota, let f = q.fiveHour {
-            var s = "额度 5h 已用 \(Int(f.usedPercentage.rounded()))%"
-            if let r = f.resetsAt { s += r > Date() ? " · \(Self.hms(r.timeIntervalSinceNow)) 后重置" : " · 已重置" }
-            if let w = q.sevenDay { s += " · 7d 已用 \(Int(w.usedPercentage.rounded()))%" }
-            let age = Date().timeIntervalSince(q.recordedAt)
-            if age > 600 { s += "（\(Int(age / 60)) 分钟前）" }
-            menu.addItem(NSMenuItem(title: s, action: nil, keyEquivalent: ""))
-        } else if state.quota == nil {
-            // 没数据也不藏这一行：未接入给入口，已接入说明还在等数据（menuNeedsUpdate 只在开菜单时跑，读一次配置无妨）
-            let st = QuotaInstaller.inspect()
-            let title: String
-            if st.installed     { title = "额度：已接入，等待 Claude Code 刷新状态栏" }
-            else if st.hasRecord { title = "额度：接入已失效 · 点击处理" }
-            else                { title = "额度：未接入 · 点击接入" }
-            let it = NSMenuItem(title: title,
-                                action: st.installed ? nil : #selector(openSettingsForQuota), keyEquivalent: "")
-            it.target = self
-            menu.addItem(it)
-        }
-        // 权限确认状态同理：未接入时给直达入口（menuNeedsUpdate 只在开菜单时跑，读一次配置无妨）
-        if !HooksInstaller.inspect().installed {
-            let it = NSMenuItem(title: "权限确认状态：未接入 · 点击接入", action: #selector(openSettingsForHooks), keyEquivalent: "")
-            it.target = self
-            menu.addItem(it)
-        }
-
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "切换动画", action: nil, keyEquivalent: ""))
-        for name in units.first?.host.availableAnimations ?? [] {
-            let it = NSMenuItem(title: "   " + name.replacingOccurrences(of: ".html", with: ""),
-                                action: #selector(pickAnimation(_:)), keyEquivalent: "")
-            it.target = self
-            it.representedObject = name
-            it.state = (name == animation) ? .on : .off
-            menu.addItem(it)
-        }
-
-        // 小工具：每个小工具一个子菜单选槽位；事件反应：逐项开关。改动即推给所有皮肤页面
-        menu.addItem(.separator())
-        let widgetRoot = NSMenuItem(title: "小工具", action: nil, keyEquivalent: "")
-        let widgetMenu = NSMenu()
-        let slots = Prefs.widgetSlots
-        for w in Prefs.widgets {
-            let item = NSMenuItem(title: "\(w.name)  ·  \(Prefs.slots.first { $0.id == slots[w.id] }?.name ?? "?")", action: nil, keyEquivalent: "")
-            let sub = NSMenu()
-            for s in Prefs.slots {
-                let it = NSMenuItem(title: s.name, action: #selector(pickWidgetSlot(_:)), keyEquivalent: "")
-                it.target = self
-                it.representedObject = "\(w.id) \(s.id)"
-                it.state = slots[w.id] == s.id ? .on : .off
-                sub.addItem(it)
-            }
-            item.submenu = sub
-            widgetMenu.addItem(item)
-        }
-        widgetRoot.submenu = widgetMenu
-        menu.addItem(widgetRoot)
-        let fxRoot = NSMenuItem(title: "事件反应", action: nil, keyEquivalent: "")
-        let fxMenu = NSMenu()
-        let flags = Prefs.reactionFlags
-        for r in Prefs.reactions {
-            let it = NSMenuItem(title: r.name, action: #selector(toggleReaction(_:)), keyEquivalent: "")
-            it.target = self
-            it.representedObject = r.id
-            it.state = flags[r.id] == true ? .on : .off
-            fxMenu.addItem(it)
-        }
-        fxRoot.submenu = fxMenu
-        menu.addItem(fxRoot)
-
-        menu.addItem(.separator())
-        let hudItem = NSMenuItem(title: "状态卡位置", action: nil, keyEquivalent: "")
-        menu.addItem(hudItem)
-        let drag = NSMenuItem(title: "   拖动到任意位置…", action: #selector(beginHudEdit), keyEquivalent: "")
-        drag.target = self
-        menu.addItem(drag)
-        let float = NSMenuItem(title: "   置顶悬浮（盖在所有窗口之上）", action: #selector(toggleHudFloat), keyEquivalent: "")
-        float.target = self
-        float.state = UserDefaults.standard.bool(forKey: "hudFloat") ? .on : .off
-        menu.addItem(float)
-        let hudDefaults = UserDefaults.standard
-        let hasFreePosition = ["hudOffset", "hudPositions", "hudX"].contains { hudDefaults.object(forKey: $0) != nil }
-        let cur = hasFreePosition ? "" : (hudDefaults.string(forKey: "hudAnchor") ?? "br")
-        for (code, name) in [("tl","左上"),("tr","右上"),("bl","左下"),("br","右下")] {
-            let it = NSMenuItem(title: "   " + name, action: #selector(pickHudAnchor(_:)), keyEquivalent: "")
-            it.target = self
-            it.representedObject = code
-            it.state = (code == cur) ? .on : .off
-            menu.addItem(it)
-        }
-
-        menu.addItem(.separator())
-        let fps = units.first?.host.reportedFPS ?? 0
-        menu.addItem(NSMenuItem(title: String(format: "渲染 %@ · %.0f fps", units.first?.rendering == true ? "开" : "停", fps), action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: String(format: "遮挡 occlusionState=%@ · 覆盖率 %.0f%%", lastOccluded ? "遮住" : "可见", lastCoverage * 100), action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: String(format: "探测 %.1fms · 覆盖计算 %.1fms · %@", state.probeMillis, coverageMillis, onBattery ? "电池" : "外接电源"), action: nil, keyEquivalent: ""))
-
-        menu.addItem(.separator())
-        let settingsItem = NSMenuItem(title: "设置…", action: #selector(openSettings), keyEquivalent: ",")
-        settingsItem.target = self
-        menu.addItem(settingsItem)
-        let helpItem = NSMenuItem(title: "使用说明…", action: #selector(showWelcome), keyEquivalent: "")
-        helpItem.target = self
-        menu.addItem(helpItem)
-        let pause = NSMenuItem(title: manuallyPaused ? "恢复动画" : "暂停动画",
-                               action: #selector(togglePause), keyEquivalent: "")
-        pause.target = self
-        menu.addItem(pause)
-        let quit = NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q")
-        quit.target = self
-        menu.addItem(quit)
-    }
 
     private static func hms(_ t: TimeInterval) -> String {
         let s = max(0, Int(t)); return String(format: "%02d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
     }
 
-    @objc private func pickAnimation(_ sender: NSMenuItem) {
+    @objc func pickAnimation(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
         applyAnimation(name)
     }
@@ -825,30 +463,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 换皮肤的唯一入口：桌面各屏 + 设置预览一起换
     func applyAnimation(_ name: String) {
         animation = name
-        UserDefaults.standard.set(name, forKey: "animation")
+        Prefs.setAnimation(name)
         units.forEach { $0.host.load(name); $0.host.pushConfig(Prefs.config(skin: name)) }   // 新皮肤的自声明设置值随就绪补发
         settings?.reloadSkin(name)
     }
 
-    @objc private func pickWidgetSlot(_ sender: NSMenuItem) {
+    @objc func pickWidgetSlot(_ sender: NSMenuItem) {
         guard let s = sender.representedObject as? String else { return }
         let p = s.split(separator: " ").map(String.init)
         guard p.count == 2, Prefs.setWidget(p[0], slot: p[1]) else { return }
         pushPrefs()
     }
 
-    @objc private func toggleReaction(_ sender: NSMenuItem) {
+    @objc func toggleReaction(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         Prefs.setReaction(id, on: sender.state != .on)
         pushPrefs()
     }
 
-    @objc private func togglePause() { manuallyPaused.toggle(); tick() }
-    @objc private func beginHudEdit() { startHudEdit() }
-    @objc private func toggleHudFloat() { setHudFloat(!UserDefaults.standard.bool(forKey: "hudFloat")) }
-    @objc private func pickHudAnchor(_ sender: NSMenuItem) {
+    @objc func togglePause() { manuallyPaused.toggle(); tick() }
+    @objc func beginHudEdit() { hud.beginEdit() }
+    @objc func toggleHudFloat() { hud.setFloating(!Prefs.hudFloat) }
+    @objc func toggleHudAutoFloat() { hud.setAutoFloat(!Prefs.hudAutoFloat) }
+    @objc func pickHudAnchor(_ sender: NSMenuItem) {
         guard let a = sender.representedObject as? String else { return }
-        setHudAnchor(a)
+        hud.setAnchor(a)
     }
 
     private func cycleAnimation() {
@@ -858,98 +497,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         applyAnimation(next)
         FileHandle.standardError.write("[anim] 切换到 \(next)\n".data(using: .utf8)!)
     }
-    @objc private func quit() { NSApp.terminate(nil) }
+    @objc func quit() { NSApp.terminate(nil) }
 
-    // MARK: - 诊断日志
-
-    // diag.csv 每秒一行、约 5.7 MB/天，是 P0 判据（./ld report）的唯一数据源：不能清空（重启 / launchd 拉起都要追加），
-    // 也不能无限长（2026-08-28 已 12.5 MB，一年 2 GB）。按**本地日期**轮转：当前文件永远叫 diag.csv（report.py 与老习惯不变），
-    // 跨天时改名为 diag-<最后一行的日期>.csv 归档，只保留最近 diagRetentionDays 天；report.py 会把归档一起读。
-    // 写入用会抛 Swift 错误的 write(contentsOf:)：老的 write(_:) 在磁盘满时抛 ObjC 异常，Swift 接不住、进程直接崩
-    private static let diagRetentionDays = 30
-    private static let diagHeader = "ts,phase,tool,sessions,occluded,coverage,rendering,fps,probeMs,coverageMs,battery,vis,realFps\n"
-    private static let dayFormatter: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.locale = Locale(identifier: "en_US_POSIX"); return f
-    }()
-    private var diagDay = ""                                   // 当前 diag.csv 对应的本地日期
-    private var diagDir: String { FileManager.default.currentDirectoryPath }
-    private var diagPath: String { diagDir + "/diag.csv" }
-
-    private func openDiagLog() {
-        let fm = FileManager.default
-        let today = Self.dayFormatter.string(from: Date())
-        // 上次运行留下的文件若属于更早的日期（mtime = 最后一行写入的那天），先归档再开新的
-        if fm.fileExists(atPath: diagPath),
-           let m = (try? fm.attributesOfItem(atPath: diagPath))?[.modificationDate] as? Date {
-            let day = Self.dayFormatter.string(from: m)
-            if day != today { archiveDiag(as: day) }
-        }
-        if !fm.fileExists(atPath: diagPath) {
-            fm.createFile(atPath: diagPath, contents: Self.diagHeader.data(using: .utf8))
-        }
-        diagHandle = FileHandle(forWritingAtPath: diagPath)
-        diagDay = today
-        if let h = diagHandle {
-            _ = try? h.seekToEnd()
-            FileHandle.standardError.write("[diag] 写入 \(diagPath)\n".data(using: .utf8)!)
-        } else {
-            // 以前这里静默：cwd 不可写（如双击 .app 时 cwd=/）诊断就悄悄没了
-            FileHandle.standardError.write("[diag] 打不开 \(diagPath)（目录不可写？），诊断日志停用\n".data(using: .utf8)!)
-        }
-        pruneDiagArchives()
-    }
-
-    /// diag.csv → diag-<day>.csv；同名已存在就加序号，绝不覆盖
-    private func archiveDiag(as day: String) {
-        let fm = FileManager.default
-        var dst = diagDir + "/diag-\(day).csv"
-        var n = 1
-        while fm.fileExists(atPath: dst) { dst = diagDir + "/diag-\(day)-\(n).csv"; n += 1 }
-        do {
-            try fm.moveItem(atPath: diagPath, toPath: dst)
-            FileHandle.standardError.write("[diag] 已归档 \(dst)\n".data(using: .utf8)!)
-        } catch {
-            FileHandle.standardError.write("[diag] 归档失败：\(error.localizedDescription)\n".data(using: .utf8)!)
-        }
-    }
-
-    /// 删掉超过保留期的归档。文件名里的 yyyy-MM-dd 字典序即时间序
-    private func pruneDiagArchives() {
-        let fm = FileManager.default
-        guard let names = try? fm.contentsOfDirectory(atPath: diagDir) else { return }
-        let cutoff = Self.dayFormatter.string(from: Date(timeIntervalSinceNow: -Double(Self.diagRetentionDays) * 86400))
-        for n in names where n.hasPrefix("diag-") && n.hasSuffix(".csv") {
-            let day = String(n.dropFirst("diag-".count).prefix(10))
-            if day < cutoff { try? fm.removeItem(atPath: diagDir + "/" + n) }
-        }
-    }
+    // MARK: - 诊断日志（实现在 DiagLogger，这里只负责每拍取样）
 
     private func writeDiagLine() {
-        guard diagHandle != nil else { return }
-        let today = Self.dayFormatter.string(from: Date())
-        if today != diagDay {                                  // 跨天：关掉、归档昨天的、开今天的
-            try? diagHandle?.close()
-            diagHandle = nil
-            archiveDiag(as: diagDay)
-            openDiagLog()
-            guard diagHandle != nil else { return }
-        }
-        let line = String(format: "%@,%@,%@,%d,%d,%.3f,%d,%.0f,%.2f,%.2f,%d,%@,%d\n",
-                          ISO8601DateFormatter().string(from: Date()),
-                          state.phase.rawValue, state.tool ?? "", state.sessions.count,
-                          lastOccluded ? 1 : 0, lastCoverage,
-                          units.first?.rendering == true ? 1 : 0,
-                          units.first?.host.reportedFPS ?? 0,
-                          state.probeMillis, coverageMillis, onBattery ? 1 : 0,
-                          lastVis, max(0, lastFrames - prevFrames))
-        do {
-            try diagHandle?.write(contentsOf: line.data(using: .utf8)!)
-        } catch {
-            // 磁盘满 / 文件被挪走：停掉诊断，主功能不受影响，也不再每秒重试
-            FileHandle.standardError.write("[diag] 写入失败（\(error.localizedDescription)），诊断日志停用\n".data(using: .utf8)!)
-            try? diagHandle?.close()
-            diagHandle = nil
-        }
+        diag?.write(DiagLogger.Sample(
+            phase: state.phase.rawValue, tool: state.tool ?? "", sessions: state.sessions.count,
+            occluded: lastOccluded, coverage: lastCoverage,
+            rendering: units.first?.rendering == true,
+            fps: units.first?.host.reportedFPS ?? 0,
+            probeMillis: state.probeMillis, coverageMillis: coverageMillis,
+            onBattery: onBattery, visibility: lastVis,
+            realFrames: max(0, lastFrames - prevFrames)))
     }
 }
 

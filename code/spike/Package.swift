@@ -21,6 +21,12 @@ let package = Package(
             name: "LdHook",
             path: "Sources/LdHook",
             swiftSettings: [.unsafeFlags(["-swift-version", "5"])]
+        ),
+        .testTarget(
+            name: "LiveDesktopSpikeTests",
+            dependencies: ["LiveDesktopSpike"],
+            path: "Tests/LiveDesktopSpikeTests",
+            swiftSettings: [.unsafeFlags(["-swift-version", "5"])]
         )
     ]
 )

@@ -23,6 +23,8 @@ final class DragOverlay: NSView {
 /// 位置归 AppDelegate 管（家屏 + 屏内偏移），可跨屏拖到任意一块显示器。
 final class HUDWindow: NSWindow {
     private var normalLevel: NSWindow.Level = .normal
+    private var userFloat = false     // 常驻置顶（用户偏好，./ld hud float）
+    private var elevated = false      // 按需浮现（决策 011）：有会话等你时宿主临时抬起
 
     init() {
         super.init(contentRect: CGRect(x: 0, y: 0, width: 260, height: 100),
@@ -43,10 +45,17 @@ final class HUDWindow: NSWindow {
         isReleasedWhenClosed = false
     }
 
-    /// 置顶悬浮：状态卡是全局状态指引，可选择盖在所有应用窗口之上（低于菜单栏与 Dock），
+    /// 置顶悬浮（常驻，用户偏好）：状态卡是全局状态指引，可选择盖在所有应用窗口之上（低于菜单栏与 Dock），
     /// 并允许出现在全屏 App 的 Space 里；关闭则回到桌面图标层之上、只在桌面露出时可见。
-    /// 编辑模式进行中不动 level，结束时 setEditing(false) 会回到这里设的 normalLevel。
-    func setFloating(_ on: Bool) {
+    func setFloating(_ on: Bool) { userFloat = on; applyLevel() }
+
+    /// 按需浮现（决策 011）：有会话等你时由宿主临时抬到悬浮层，回复后放下；与常驻置顶偏好互不覆盖
+    func setElevated(_ on: Bool) { elevated = on; applyLevel() }
+
+    /// 常驻置顶或按需浮现任一生效即上浮。
+    /// 编辑模式进行中不动 level，结束时 setEditing(false) 会回到这里算出的 normalLevel。
+    private func applyLevel() {
+        let on = userFloat || elevated
         normalLevel = on ? .floating : NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
         collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, on ? .fullScreenAuxiliary : .fullScreenNone]
         if level != .floating || !on { level = normalLevel }
@@ -69,7 +78,7 @@ final class HUDWindow: NSWindow {
             orderFrontRegardless()
         } else {
             level = normalLevel
-            let through = UserDefaults.standard.bool(forKey: "hudClickThrough")
+            let through = Prefs.hudClickThrough
             setClickThrough(through)
             orderFront(nil)
         }

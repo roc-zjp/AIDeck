@@ -15,13 +15,18 @@ case "${1:-status}" in
                          echo "状态卡已置顶悬浮：盖在所有应用窗口之上（低于菜单栏与 Dock），全屏 App 里也可见";;
             desktop)     echo "hud desktop" >> ~/.live-desktop.cmd
                          echo "状态卡回到桌面图标层之上：只在桌面露出时可见";;
+            auto)        case "${3:-}" in
+                           on|off) echo "hud auto $3" >> ~/.live-desktop.cmd
+                                   echo "有会话等你时自动浮现：$3（决策 011，默认开）";;
+                           *) echo "用法: ./ld hud auto on|off"; exit 1;;
+                         esac;;
             through)     echo "hud through" >> ~/.live-desktop.cmd; echo "状态卡已点击穿透（不可拖，./ld hud drag 换回）";;
             drag)        echo "hud drag" >> ~/.live-desktop.cmd; echo "状态卡可直接拖动";;
             edit|move|"") echo "hud edit" >> ~/.live-desktop.cmd
                          echo "已进入拖动模式：状态卡临时浮到最上层并高亮"
                          echo "→ 直接按住它拖到想要的位置，松手静止 1.5 秒即保存"
                          echo "→ 完全不动则 20 秒后自动退出，位置不变";;
-            *) echo "用法: ./ld hud [tl|tr|bl|br|edit|float|desktop|through|drag]";;
+            *) echo "用法: ./ld hud [tl|tr|bl|br|edit|float|desktop|auto on|off|through|drag]";;
           esac;;
   pause)  [ -n "$PID" ] && kill -USR1 "$PID" && echo "已切换暂停/恢复" || echo "未运行";;
   settings) if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi

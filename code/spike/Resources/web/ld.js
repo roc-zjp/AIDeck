@@ -17,8 +17,10 @@
   let state = { phase: 'idle', sessions: [], activeSessions: 0 };
   // 小工具槽位与事件反应的偏好：宿主经 setConfig 推送；没有宿主（浏览器里调试）就用默认
   const DEFAULT_CONFIG = {
-    // task 已删（与 SESSIONS/状态卡完全重复）；clock 默认关（菜单栏有时钟，想要桌面时钟的自己开）
-    widgets:   { sessions: 'tl', context: 'tr', activity: 'bl', repos: 'br', power: 'bc', clock: 'off' },
+    // 只在没有宿主时生效（浏览器里直接开页面调试）；有宿主时被 setConfig 推来的真实偏好整体覆盖。
+    // **必须与 Prefs.swift 的 defaultWidgets 保持同一组键**——少一个键，无宿主调试时该小工具的槽位就是 undefined。
+    // task 已删（与 SESSIONS/状态卡完全重复）；clock / system 默认关（菜单栏有时钟；机器总量不是核心感知，想看的自己开）
+    widgets:   { sessions: 'tl', context: 'tr', activity: 'bl', repos: 'br', power: 'bc', clock: 'off', system: 'off' },
     reactions: { toolPulse: true, phaseRipple: true, rechargeBurst: true, lowPowerFlicker: true, satellites: true },
     model: 'station',   // hologram 皮肤的 3D 模型：内置名或 user/<文件名>（ld-3d.js 负责加载）
     skin: {},           // 皮肤自声明设置项的值（见 declarePrefs）

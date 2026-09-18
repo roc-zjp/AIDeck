@@ -164,6 +164,44 @@ final class ClaudeStateProbe {
         }
     }
 
+    // MARK: - 判定规则（纯函数，与文件读写无关，可单测。真值表见 decisions/007、清除规则见 decisions/009）
+
+    /// 决策 007 的真值表：注册表 status × jsonl 最后一条主线记录 → 阶段。
+    /// 返回 nil = 这条不该列出（还没开口的空会话，或收尾中的后台任务）
+    static func resolvePhase(busy: Bool, last: Tail.Last?, kind: String) -> (phase: ClaudePhase, tool: String?)? {
+        let out: (phase: ClaudePhase, tool: String?)
+        switch (busy, last) {
+        case (true, .toolUse(let name)?): out = (.running, name)
+        case (true, _):                   out = (.thinking, nil)
+        case (false, .assistantText?),
+             (false, .toolUse?):          out = (.waiting, nil)   // 说完了 / 工具中途被你打断后停下：球都在你这边
+        case (false, .user?):             out = (.thinking, nil)  // 你刚发出去，注册表还没翻成 busy
+        case (false, nil):                return nil              // 还没开口的空会话，不列
+        }
+        if kind == "bg" && out.phase == .waiting { return nil }   // 后台任务收尾不是在等你
+        return out
+    }
+
+    /// 停滞判定：busy 但太久没有任何输出（含 subagent 侧链）。模型回复几分钟内必有落盘，
+    /// 工具（构建等）可以更久；超过阈值就不再冒充"在工作"。转后台的本体沉默是正常的，不算停滞
+    static func isStalled(busy: Bool, parked: Bool, phase: ClaudePhase, idleSeconds: Int) -> Bool {
+        !parked && busy && idleSeconds >= (phase == .running ? 1800 : 600)
+    }
+
+    /// 决策 009：没有「框关闭」事件，只能推断确认框是否已被处理。
+    /// jsonl 前进到 at 之后（允许 2s 容差）= 允许或拒绝都会落盘；注册表不再 busy = 框已消失；超 30 分钟 = 兜底防残留
+    static func attentionHandled(busy: Bool, jsonlMtime: Date, at: Date, now: Date) -> Bool {
+        !busy || jsonlMtime.timeIntervalSince(at) > 2 || now.timeIntervalSince(at) > 1800
+    }
+
+    /// 全局态取最活跃的一个：running > thinking > waiting；同级取最近有动静的。
+    /// 停滞的不参与（不能让僵尸会话把反应堆霸占成"推理中"）；转后台的也不参与（活儿由 bg 会话代表）
+    static func topSession(_ sessions: [SessionState]) -> SessionState? {
+        let rank: [ClaudePhase: Int] = [.idle: 0, .waiting: 1, .thinking: 2, .running: 3]
+        return sessions.filter { !$0.stalled && !$0.parked }
+            .max { (rank[$0.phase] ?? 0, -$0.idleSeconds) < (rank[$1.phase] ?? 0, -$1.idleSeconds) }
+    }
+
     /// 注册表里一条会话记录
     private struct Registered {
         var pid: Int32
@@ -219,9 +257,7 @@ final class ClaudeStateProbe {
 
         // 全局态取最活跃的一个：running > thinking > waiting；同级取最近有动静的。
         // 停滞的不参与（不能让僵尸会话把反应堆霸占成"推理中"）；转后台的也不参与（活儿由 bg 会话代表）
-        let rank: [ClaudePhase: Int] = [.idle: 0, .waiting: 1, .thinking: 2, .running: 3]
-        if let top = state.sessions.filter({ !$0.stalled && !$0.parked })
-            .max(by: { (rank[$0.phase] ?? 0, -$0.idleSeconds) < (rank[$1.phase] ?? 0, -$1.idleSeconds) }) {
+        if let top = Self.topSession(state.sessions) {
             state.phase = top.phase
             state.tool = top.tool
             state.project = top.project
@@ -257,26 +293,16 @@ final class ClaudeStateProbe {
             let tail = entry.tail
 
             let busy = reg.status == "busy"
-            let phase: ClaudePhase
-            var tool: String?
-            switch (busy, tail.last) {
-            case (true, .toolUse(let name)?): phase = .running; tool = name
-            case (true, _):                   phase = .thinking
-            case (false, .assistantText?),
-                 (false, .toolUse?):          phase = .waiting     // 说完了 / 工具中途被你打断后停下：球都在你这边
-            case (false, .user?):             phase = .thinking    // 你刚发出去，注册表还没翻成 busy
-            case (false, nil):                continue             // 还没开口的空会话，不列
-            }
-            if reg.kind == "bg" && phase == .waiting { continue }   // 后台任务收尾不是在等你
+            guard let resolved = Self.resolvePhase(busy: busy, last: tail.last, kind: reg.kind) else { continue }
+            let phase = resolved.phase
+            let tool = resolved.tool
 
             // 等你输入：从 Claude 说完那一刻算（Claude Code 自己记的时刻）；工作中：距最后一次写入，用来如实标出长时间无输出
             let since = phase == .waiting ? (reg.statusUpdatedAt ?? mtime) : mtime
             let idle = max(0, Int(now.timeIntervalSince(since)))
             // 转后台：parkedJobId 对应一个活着的 bg 会话——本体沉默是正常的，不算停滞，活儿由 bg 会话代表
             let parked = reg.parkedJobId.map { liveBgJobs.contains($0) } ?? false
-            // 停滞判定：busy 但太久没有任何输出（含 subagent 侧链）。模型回复几分钟内必有落盘，
-            // 工具（构建等）可以更久；超过阈值就不再冒充"在工作"
-            var stalled = !parked && busy && idle >= (phase == .running ? 1800 : 600)
+            var stalled = Self.isStalled(busy: busy, parked: parked, phase: phase, idleSeconds: idle)
             // 精细态：Notification hook 说这个会话卡在确认框 / 表单——球其实在你这边，别再冒充 running / thinking
             var phaseOut = phase, toolOut = tool, idleOut = idle
             var attention: AttentionKind?
@@ -391,8 +417,9 @@ final class ClaudeStateProbe {
               let type = o["type"] as? String,
               let atEpoch = o["at"] as? Double else { return nil }
         let at = Date(timeIntervalSince1970: atEpoch)
-        let handled = !busy || jsonlMtime.timeIntervalSince(at) > 2 || now.timeIntervalSince(at) > 1800
-        if handled { try? FileManager.default.removeItem(at: url); return nil }
+        if Self.attentionHandled(busy: busy, jsonlMtime: jsonlMtime, at: at, now: now) {
+            try? FileManager.default.removeItem(at: url); return nil
+        }
         return Attention(kind: type == "permission_prompt" ? .permission : .elicitation,
                          at: at, tool: o["tool"] as? String)
     }
@@ -448,7 +475,8 @@ final class ClaudeStateProbe {
 
     // MARK: - jsonl 尾部
 
-    private struct Tail {
+    /// jsonl 尾部解析出的事实。internal 而非 private：`resolvePhase` 的真值表要能被单测直接喂
+    struct Tail {
         enum Last { case assistantText, toolUse(String), user }
         var last: Last?
         var branch: String?
