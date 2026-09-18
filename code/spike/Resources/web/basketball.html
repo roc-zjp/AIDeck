@@ -30,6 +30,7 @@ const sessLabel = s => (s.nameUserSet && s.name ? s.name : (s.project || '?')) +
 let W = 0, H = 0, S = 1, bounds = { top: 0, bottom: 0, left: 0, right: 0 };
 
 __ld.declarePrefs([
+  { id: 'model',      name: '数字人模型', type: 'model', default: 'station' },
   { id: 'camera',     name: '机位',   type: 'choice', default: 'random', options: [{ id: 'random', name: '每球随机' }, { id: 'side', name: '侧面（看弧线）' }, { id: 'behind', name: '球员背后' }] },
   { id: 'scoreboard', name: '记分牌', type: 'bool',   default: true },
   { id: 'toolTag',    name: '飞行中标出工具名', type: 'bool', default: true },
@@ -690,7 +691,7 @@ __ld.loop((t, th, st) => {
   uctx.clearRect(0, 0, W, H);
 
   if (booted) {
-    ensureModel((__ld.config && __ld.config.model) || 'station');
+    ensureModel((P() && P().model) || (__ld.config && __ld.config.model) || 'station');
     update(dt, nowS, st, working, !!wait);
     pose(dt, nowS, st, !!wait);
     updateNet(nowS);

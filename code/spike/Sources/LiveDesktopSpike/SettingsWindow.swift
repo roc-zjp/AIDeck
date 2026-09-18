@@ -7,9 +7,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private weak var app: AppDelegate?
     private let previewHost = AnimationHost()
     private var skinPopup: NSPopUpButton!
-    private var modelPopup: NSPopUpButton!
     private var skinPrefsBox: NSStackView!
-    private var skinPrefsTitle: NSTextField?      // 标题随当前皮肤变：这些开关是皮肤自己声明的，不是全局设置
+    private var skinGroupTitle: NSTextField?      // 「当前皮肤」分组标题，随皮肤名变
     private var quotaStatusLabel: NSTextField!
     private var quotaActionButton: NSButton!
     private var notifStatusLabel: NSTextField!
@@ -130,15 +129,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    /// 3D 模型下拉：内置程序化模型 + 模型目录里的 .glb（显示为「自定义 · 文件名」），id 放 representedObject
-    private func rebuildModelPopup() {
-        modelPopup.removeAllItems()
-        for m in ModelServer.builtinModels { modelPopup.addItem(withTitle: "\(m.name)  \(m.id)"); modelPopup.lastItem?.representedObject = m.id }
-        for f in ModelServer.userModelFiles { modelPopup.addItem(withTitle: "自定义 · " + f); modelPopup.lastItem?.representedObject = ModelServer.userPrefix + f }
-        let cur = Prefs.model
-        if let idx = modelPopup.itemArray.firstIndex(where: { ($0.representedObject as? String) == cur }) { modelPopup.selectItem(at: idx) }
-    }
-
     func windowWillClose(_ notification: Notification) {
         previewHost.shutdown()      // 不摘 handler 会漏 WebContent 进程（见 issues.md）
         app?.settingsClosed()
@@ -202,8 +192,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         pages.forEach { controls.addArrangedSubview($0) }
         let look = pages[0], alerts = pages[1], access = pages[2]
 
-        // ---------- 页 1：外观（最常来的一页——换皮肤、调这款皮肤自己的选项、开关事件反应）
-        section(look, "皮肤", first: true)
+        // ---------- 页 1：外观
+        // 明确分两区（用户要求）：上半是**所有皮肤共用**的全局设置，下半是**当前这款皮肤自己的**参数。
+        // 分界不靠硬编码皮肤名——皮肤用 declarePrefs 自报有哪些参数（含 'model' 类型），宿主照着渲染；
+        // 所以换成不用 3D 的皮肤时，模型下拉会自己消失，不会再出现「选项摆着却毫无作用」。
+        group(look, "全局设置", note: "对所有皮肤生效", first: true)
+
+        section(look, "皮肤")
         skinPopup = NSPopUpButton()
         skinPopup.target = self
         skinPopup.action = #selector(skinChanged(_:))
@@ -217,31 +212,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         look.addArrangedSubview(skinButtons)
         look.addArrangedSubview(note("自定义皮肤：将自包含的 HTML 文件放入皮肤目录，即出现在列表中。"))
 
-        // 标题写明是哪款皮肤的选项——这些开关切换皮肤后会整组换掉，不说清楚会让人以为是全局设置
-        skinPrefsTitle = section(look, "皮肤选项")
-        skinPrefsBox = NSStackView()
-        skinPrefsBox.orientation = .vertical
-        skinPrefsBox.alignment = .leading
-        skinPrefsBox.spacing = 6
-        look.addArrangedSubview(skinPrefsBox)
-        rebuildSkinPrefs()
-
-        section(look, "3D 模型")
-        let modelRow = row()
-        modelPopup = NSPopUpButton()
-        modelPopup.target = self
-        modelPopup.action = #selector(modelChanged(_:))
-        modelPopup.widthAnchor.constraint(lessThanOrEqualToConstant: 220).isActive = true
-        rebuildModelPopup()
-        modelRow.addArrangedSubview(modelPopup)
-        for (title, sel) in [("打开模型目录", #selector(openModelsDir)), ("刷新列表", #selector(refreshModels))] {
-            modelRow.addArrangedSubview(smallButton(title, action: sel))
-        }
-        look.addArrangedSubview(modelRow)
-        look.addArrangedSubview(note("供全息投影台、空气篮球等 3D 皮肤使用，其他皮肤忽略此项。支持 .glb / .gltf / .fbx，放入模型目录即可选择。"))
-
         section(look, "事件反应")
-        look.addArrangedSubview(note("只在真实事件发生时触发：工具调用、状态切换、额度充能。"))
+        look.addArrangedSubview(note("只在真实事件发生时触发。开关对所有皮肤通用，具体表现各皮肤不同；皮肤没实现的项不会有反应。"))
         let flags = Prefs.reactionFlags
         for r in Prefs.reactions {
             let cb = NSButton(checkboxWithTitle: r.name, target: self, action: #selector(reactionToggled(_:)))
@@ -250,6 +222,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             cb.font = .systemFont(ofSize: 12)
             look.addArrangedSubview(cb)
         }
+
+        // 当前皮肤专属区：标题与内容都随皮肤重建（rebuildSkinPrefs）
+        skinGroupTitle = group(look, "当前皮肤", note: "仅对这款皮肤生效，换皮肤即整组更换")
+        skinPrefsBox = NSStackView()
+        skinPrefsBox.orientation = .vertical
+        skinPrefsBox.alignment = .leading
+        skinPrefsBox.spacing = 6
+        look.addArrangedSubview(skinPrefsBox)
+        rebuildSkinPrefs()
 
         // ---------- 页 2：提醒（什么时候、以什么方式打扰你——状态卡与系统通知是同一件事的轻重两档）
         section(alerts, "状态卡", first: true)
@@ -407,8 +388,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         box.arrangedSubviews.forEach { box.removeArrangedSubview($0); $0.removeFromSuperview() }
         let skin = app?.currentAnimation ?? ""
         let schema = app?.skinSchema(for: skin) ?? []
-        // 说清楚这组开关属于谁：换皮肤后它们会整组换掉
-        skinPrefsTitle?.stringValue = skin.isEmpty ? "皮肤选项" : "「\(AnimationHost.displayName(skin))」的选项"
+        // 分组标题带上皮肤名：这组参数换皮肤会整组换掉，标题不写清楚会被当成全局设置
+        skinGroupTitle?.stringValue = skin.isEmpty ? "当前皮肤" : "当前皮肤：" + AnimationHost.displayName(skin)
         if schema.isEmpty {
             box.addArrangedSubview(note("这款皮肤没有可调选项。"))
             return
@@ -453,6 +434,28 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 }
                 if let cur = value as? String, let idx = popup.itemArray.firstIndex(where: { ($0.representedObject as? String) == cur }) { popup.selectItem(at: idx) }
                 row.addArrangedSubview(l); row.addArrangedSubview(popup)
+            case "model":
+                // 唯一一个选项由宿主填充的类型：模型文件归宿主管（ld-model:// + 模型目录），
+                // 但「要不要模型」由皮肤声明，所以控件长在「当前皮肤」区里，换成 2D 皮肤就自动消失
+                let l = label(name, size: 12, color: .labelColor); l.widthAnchor.constraint(equalToConstant: 88).isActive = true
+                let popup = NSPopUpButton()
+                popup.identifier = NSUserInterfaceItemIdentifier(id)
+                popup.target = self; popup.action = #selector(skinChoiceChanged(_:))
+                for m in ModelServer.builtinModels {
+                    popup.addItem(withTitle: "\(m.name)  \(m.id)"); popup.lastItem?.representedObject = m.id
+                }
+                for f in ModelServer.userModelFiles {
+                    popup.addItem(withTitle: "自定义 · " + f); popup.lastItem?.representedObject = ModelServer.userPrefix + f
+                }
+                if let cur = value as? String, let idx = popup.itemArray.firstIndex(where: { ($0.representedObject as? String) == cur }) { popup.selectItem(at: idx) }
+                row.addArrangedSubview(l); row.addArrangedSubview(popup)
+                box.addArrangedSubview(row)
+                let modelButtons = self.row()
+                modelButtons.addArrangedSubview(smallButton("打开模型目录", action: #selector(openModelsDir)))
+                modelButtons.addArrangedSubview(smallButton("刷新列表", action: #selector(refreshModels)))
+                box.addArrangedSubview(modelButtons)
+                box.addArrangedSubview(note("支持 .glb / .gltf / .fbx，放入模型目录即可选择；带骨骼动画会动。"))
+                continue
             default: continue
             }
             box.addArrangedSubview(row)
@@ -487,6 +490,29 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let l = label(s, size: 13, color: .labelColor)
         l.font = .systemFont(ofSize: 13, weight: .semibold)
         return l
+    }
+
+    /// 分组标题：比 section 高一级，用一条分隔线 + 加粗大字把「全局设置」与「当前皮肤」明确切开。
+    /// 右侧跟一句灰色小字说明这一组的作用范围——分区只有说清楚范围才有意义
+    @discardableResult
+    private func group(_ page: NSStackView, _ title: String, note scope: String, first: Bool = false) -> NSTextField {
+        page.addArrangedSubview(spacer(first ? 2 : 16))
+        let line = NSBox()
+        line.boxType = .separator
+        line.translatesAutoresizingMaskIntoConstraints = false
+        line.widthAnchor.constraint(equalToConstant: columnWidth).isActive = true
+        page.addArrangedSubview(line)
+        page.addArrangedSubview(spacer(6))
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.spacing = 8
+        row.alignment = .firstBaseline
+        let t = label(title, size: 15, color: .labelColor)
+        t.font = .systemFont(ofSize: 15, weight: .bold)
+        row.addArrangedSubview(t)
+        row.addArrangedSubview(label(scope, size: 11, color: .tertiaryLabelColor))
+        page.addArrangedSubview(row)
+        return t
     }
 
     /// 一个区块的标题行：非首块前留间距。返回标题视图供深链接定位
@@ -561,18 +587,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         NSWorkspace.shared.activateFileViewerSelecting([dir.appendingPathComponent(name)])
     }
 
-    @objc private func modelChanged(_ sender: NSPopUpButton) {
-        guard let id = sender.selectedItem?.representedObject as? String else { return }
-        Prefs.setModel(id)
-        app?.pushPrefs()
-    }
-
     @objc private func openModelsDir() {
         ModelServer.ensureUserModelsDir()
         NSWorkspace.shared.open(ModelServer.userModelsDir)
     }
 
-    @objc private func refreshModels() { rebuildModelPopup() }
+    @objc private func refreshModels() { rebuildSkinPrefs() }
 
     @objc private func openSkinsDir() {
         NSWorkspace.shared.open(AnimationHost.userSkinsDir)

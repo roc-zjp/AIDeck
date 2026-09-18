@@ -314,8 +314,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if parts.count > 2, Prefs.setWidget(parts[1], slot: parts[2]) { pushPrefs() }
             case "fx":       // fx <id> on|off
                 if parts.count > 2, Prefs.setReaction(parts[1], on: parts[2] == "on") { pushPrefs() }
-            case "model":    // model <内置名 | user/文件名>（文件名可含空格）
-                if parts.count > 1, Prefs.setModel(parts.dropFirst().joined(separator: " ")) { pushPrefs() }
+            case "model":    // model <内置名 | user/文件名>（文件名可含空格）→ 写当前皮肤的模型参数
+                if parts.count > 1 {
+                    let id = parts.dropFirst().joined(separator: " ")
+                    guard ModelServer.availableModels.contains(id) else { break }
+                    Prefs.setModel(id)                       // 全局值仍留着：新皮肤第一次用它作初值
+                    if let key = modelPrefID(for: animation) { Prefs.setSkinValue(animation, id: key, value: id) }
+                    pushPrefs()
+                }
             case "skin":     // skin <id> <value> 改当前皮肤自声明的设置项；skin reset 恢复默认
                 if parts.count == 2, parts[1] == "reset" { Prefs.resetSkin(animation); pushPrefs() }
                 else if parts.count > 2 { Prefs.setSkinValue(animation, id: parts[1], value: Prefs.parseSkinValue(parts.dropFirst(2).joined(separator: " "))); pushPrefs() }
@@ -417,9 +423,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var skinSchemas: [String: [[String: Any]]] = [:]
     func registerSkinSchema(_ skin: String, _ schema: [[String: Any]]) {
         skinSchemas[skin] = schema
+        // 3D 模型从「全局一个」改成「每个皮肤自己一个」（2026-09-18）。老用户选过的模型不能丢：
+        // 某皮肤第一次报出 model 类型的设置项、而它还没存过值时，用旧的全局模型填进去。
+        // 这里只认 type == "model"，不认识任何皮肤名——换成别人写的 3D 皮肤同样适用
+        let saved = Prefs.skinValues(skin)
+        for p in schema where (p["type"] as? String) == "model" {
+            guard let id = p["id"] as? String, saved[id] == nil else { continue }
+            Prefs.setSkinValue(skin, id: id, value: Prefs.model)
+            pushPrefs()
+        }
         settings?.skinSchemaChanged(skin)
     }
     func skinSchema(for skin: String) -> [[String: Any]] { skinSchemas[skin] ?? [] }
+
+    /// 当前皮肤声明的 model 类型设置项 id（`./ld model` 要知道该写哪个键）；没有就是这款皮肤不用模型
+    func modelPrefID(for skin: String) -> String? {
+        skinSchemas[skin]?.first { ($0["type"] as? String) == "model" }?["id"] as? String
+    }
 
     // MARK: - 设置窗口
 

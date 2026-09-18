@@ -31,7 +31,13 @@ function text(str, x, y, size, alpha, align, c, weight) {
   ctx.fillStyle = rgba(c || skin.hi, alpha); ctx.fillText(str, x, y);
 }
 
-// 模型：跟着 __ld.config.model 走；加载失败如实显示错误，并回落到内置 station 保证台上有东西
+// 模型是这款皮肤自己的参数（决策 006：宿主不认识皮肤名，皮肤自己声明要什么）——
+// 设置页的「当前皮肤」区因此会出现模型下拉，换成 2D 皮肤时它自动消失
+__ld.declarePrefs([
+  { id: 'model', name: '模型', type: 'model', default: 'station' },
+]);
+
+// 模型：跟着皮肤参数 skin.model 走；加载失败如实显示错误，并回落到内置 station 保证台上有东西
 const r3 = __ld3d.available ? __ld3d.Renderer(glc) : null;
 let modelName = null, shownName = '', modelErr = __ld3d.available ? null : (__ld3d.reason || 'WebGL 不可用'), loading = false;
 function ensureModel(name) {
@@ -60,7 +66,7 @@ __ld.loop((t, th, st) => {
   const dim = ev.lowPower && __ld.flicker(t, pw.remain) ? 0.35 : 1;
   yaw += dt * (0.25 + th.energy * 0.9);          // 自转随活跃度
   spinT += dt * (0.3 + th.energy * 1.4);         // 部件转动（旋翼 / 环）随活跃度
-  if (r3) ensureModel((__ld.config && __ld.config.model) || 'station');
+  if (r3) ensureModel((__ld.config.skin && __ld.config.skin.model) || (__ld.config && __ld.config.model) || 'station');
 
   // 模型中心略高于屏幕中心，给底座和标牌留位置
   const ndc = [0, 40 * S / H * 2];

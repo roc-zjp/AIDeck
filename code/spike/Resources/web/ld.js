@@ -35,6 +35,8 @@
       if (p.type === 'bool') v = !!v;
       else if (p.type === 'number') { v = Number(v); if (!isFinite(v)) v = p.default; if (p.min != null) v = Math.max(p.min, v); if (p.max != null) v = Math.min(p.max, v); }
       else if (p.type === 'choice') { if (!(p.options || []).some(o => o.id === v)) v = p.default; }
+      // model 的可选项由宿主掌握（模型目录随时可变），页面侧只收口成非空字符串
+      else if (p.type === 'model') { if (typeof v !== 'string' || !v) v = p.default; }
       out[p.id] = v;
     }
     return out;
@@ -102,9 +104,12 @@
          { id, name, type: 'bool',   default }
          { id, name, type: 'number', default, min, max, step }
          { id, name, type: 'choice', default, options: [{ id, name }] }
-       宿主据此在设置页渲染控件、按皮肤名存值、经 setConfig 推回；皮肤每帧读 __ld.config.skin.<id> 即可。皮肤作者不需要改宿主。 */
+         { id, name, type: 'model',  default }   ← 选一个 3D 模型；选项由宿主填（内置模型 + 用户模型目录）
+       宿主据此在设置页渲染控件、按皮肤名存值、经 setConfig 推回；皮肤每帧读 __ld.config.skin.<id> 即可。皮肤作者不需要改宿主。
+       'model' 是唯一一个选项由宿主提供的类型：模型文件归宿主管（ld-model:// + 模型目录），
+       但"这款皮肤要不要模型、叫什么名字"由皮肤自己说——宿主不认识任何皮肤名。 */
     declarePrefs(schema) {
-      const T = { bool: 1, number: 1, choice: 1 };
+      const T = { bool: 1, number: 1, choice: 1, model: 1 };
       skinSchema = (Array.isArray(schema) ? schema : []).filter(p => p && typeof p.id === 'string' && T[p.type]).map(p => ({
         id: p.id, name: String(p.name || p.id), type: p.type, default: p.default,
         min: p.min, max: p.max, step: p.step, options: Array.isArray(p.options) ? p.options.map(o => ({ id: String(o.id), name: String(o.name || o.id) })) : undefined,

@@ -159,8 +159,11 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
             - 可选：`<script src="three.bundle.js"></script><script src="ld-3d.js"></script>` 后用 `__ld3d.Renderer(canvas)` 画全息风格 3D 模型，
               `__ld3d.loadModel(__ld.config.model)` 拿用户在设置页选的模型（内置程序化模型或 ~/.config/live-desktop/models 里的 .glb / .gltf / .fbx，带骨骼动画会动）。
               three.bundle.js 就是打包好的 Three.js（全局 LD_THREE），自定义皮肤也可以直接用它画别的。写法看内置皮肤 hologram
-            - 可选：皮肤自己的设置项——加载时调一次 `__ld.declarePrefs([{ id, name, type: 'bool'|'number'|'choice', default, min/max/step 或 options }])`，
-              设置页会出现「皮肤设置」区（复选框 / 滑杆 / 下拉），值按皮肤名保存并经 setConfig 推回，每帧读 `__ld.config.skin.<id>` 即可；`./ld skin <id> <值>` 也能改。
+            - 可选：皮肤自己的设置项——加载时调一次 `__ld.declarePrefs([{ id, name, type: 'bool'|'number'|'choice'|'model', default, min/max/step 或 options }])`，
+              它们会出现在设置页的**「当前皮肤」区**（与「全局设置」区分开），换皮肤即整组更换；
+              `type: 'model'` 的选项由宿主填充（内置程序化模型 + 模型目录里的 .glb/.gltf/.fbx），
+              但**「要不要模型」由皮肤自己声明**——声明了才有模型下拉，2D 皮肤不会看到它（例子：hologram 的「模型」、basketball 的「数字人模型」）。
+              宿主按 type 渲染成复选框 / 滑杆 / 下拉，值按皮肤名保存并经 setConfig 推回，每帧读 `__ld.config.skin.<id>` 即可；`./ld skin <id> <值>` 也能改。
               例子看内置皮肤 bounce（重力开关 / 球数上限 / 球的大小）。宿主不认识任何具体 id，皮肤作者不需要改 Swift
             - 可选：被动输入感知——`__ld.mouse` 是光标在本屏的页面坐标 `{x, y, t}`（不在本屏为 null），`__ld.takeClicks()` 取走旁听到的桌面左键点击 `[{x, y, t}]`。
               宿主不拦截任何事件（点击照常落到 Finder / 图标），所以只能"感知"不能"接管"：适合球躲光标、点哪生成什么这类玩法，做不了需要键盘或精确点击的游戏。浏览器里调试时自动回落到 DOM 鼠标事件
