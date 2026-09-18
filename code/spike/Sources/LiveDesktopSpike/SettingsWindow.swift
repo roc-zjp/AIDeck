@@ -9,6 +9,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var skinPopup: NSPopUpButton!
     private var modelPopup: NSPopUpButton!
     private var skinPrefsBox: NSStackView!
+    private var skinPrefsTitle: NSTextField?      // 标题随当前皮肤变：这些开关是皮肤自己声明的，不是全局设置
     private var quotaStatusLabel: NSTextField!
     private var quotaActionButton: NSButton!
     private var notifStatusLabel: NSTextField!
@@ -120,9 +121,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private func rebuildSkinPopup(selecting name: String) {
         skinPopup.removeAllItems()
         for file in previewHost.availableAnimations {
-            let title = file.hasPrefix(AnimationHost.userPrefix)
-                ? "自定义 · " + String(file.dropFirst(AnimationHost.userPrefix.count)).replacingOccurrences(of: ".html", with: "")
-                : file.replacingOccurrences(of: ".html", with: "")
+            let title = AnimationHost.displayName(file)
             skinPopup.addItem(withTitle: title)
             skinPopup.lastItem?.representedObject = file
         }
@@ -187,7 +186,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         content.addSubview(scroll)
         scrollView = scroll
 
-        let tabs = NSSegmentedControl(labels: ["数据接入", "外观", "通知与启动"], trackingMode: .selectOne,
+        let tabs = NSSegmentedControl(labels: ["外观", "提醒", "接入与启动"], trackingMode: .selectOne,
                                       target: self, action: #selector(pageChanged(_:)))
         tabs.segmentStyle = .automatic
         tabs.translatesAutoresizingMaskIntoConstraints = false
@@ -201,31 +200,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             return p
         }
         pages.forEach { controls.addArrangedSubview($0) }
-        let access = pages[0], look = pages[1], general = pages[2]
+        let look = pages[0], alerts = pages[1], access = pages[2]
 
-        // ---------- 页 1：数据接入（首次使用最先要配的；菜单栏「点击接入」与欢迎面板直达这里）
-        sectionAnchors["quota"] = section(access, "额度（五小时 / 七天用量）", first: true); sectionPage["quota"] = 0
-        quotaStatusLabel = wrappedLabel("…", size: 12, color: .labelColor)
-        access.addArrangedSubview(quotaStatusLabel)
-        let quotaButtons = row()
-        quotaActionButton = smallButton("", action: #selector(quotaActionTapped))
-        quotaButtons.addArrangedSubview(quotaActionButton)
-        quotaButtons.addArrangedSubview(smallButton("打开数据目录", action: #selector(openQuotaDir)))
-        access.addArrangedSubview(quotaButtons)
-        access.addArrangedSubview(note("接入后原状态栏命令原样执行，终端显示不变。接入前自动备份配置，可随时恢复。"))
-        refreshQuotaSection()
-
-        sectionAnchors["hooks"] = section(access, "权限确认状态"); sectionPage["hooks"] = 0
-        hooksStatusLabel = wrappedLabel("…", size: 12, color: .labelColor)
-        access.addArrangedSubview(hooksStatusLabel)
-        let hooksButtons = row()
-        hooksActionButton = smallButton("", action: #selector(hooksActionTapped))
-        hooksButtons.addArrangedSubview(hooksActionButton)
-        access.addArrangedSubview(hooksButtons)
-        access.addArrangedSubview(note("接入后可精确显示「等待确认」并即时通知。接入前自动备份配置，可随时撤销；此项以标准 JSON 重写配置文件，注释不保留。"))
-        refreshHooksSection()
-
-        // ---------- 页 2：外观
+        // ---------- 页 1：外观（最常来的一页——换皮肤、调这款皮肤自己的选项、开关事件反应）
         section(look, "皮肤", first: true)
         skinPopup = NSPopUpButton()
         skinPopup.target = self
@@ -240,7 +217,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         look.addArrangedSubview(skinButtons)
         look.addArrangedSubview(note("自定义皮肤：将自包含的 HTML 文件放入皮肤目录，即出现在列表中。"))
 
-        section(look, "皮肤选项")
+        // 标题写明是哪款皮肤的选项——这些开关切换皮肤后会整组换掉，不说清楚会让人以为是全局设置
+        skinPrefsTitle = section(look, "皮肤选项")
         skinPrefsBox = NSStackView()
         skinPrefsBox.orientation = .vertical
         skinPrefsBox.alignment = .leading
@@ -260,12 +238,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             modelRow.addArrangedSubview(smallButton(title, action: sel))
         }
         look.addArrangedSubview(modelRow)
-        look.addArrangedSubview(note("用于全息投影台等 3D 皮肤。支持 .glb / .gltf / .fbx，放入模型目录即可选择。"))
-
-        section(look, "小工具")
-        look.addArrangedSubview(note("在左侧预览上拖放：拖入九宫格即装配到该位置，拖回下方托盘即移除。"))
+        look.addArrangedSubview(note("供全息投影台、空气篮球等 3D 皮肤使用，其他皮肤忽略此项。支持 .glb / .gltf / .fbx，放入模型目录即可选择。"))
 
         section(look, "事件反应")
+        look.addArrangedSubview(note("只在真实事件发生时触发：工具调用、状态切换、额度充能。"))
         let flags = Prefs.reactionFlags
         for r in Prefs.reactions {
             let cb = NSButton(checkboxWithTitle: r.name, target: self, action: #selector(reactionToggled(_:)))
@@ -275,31 +251,31 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             look.addArrangedSubview(cb)
         }
 
-        section(look, "状态卡")
+        // ---------- 页 2：提醒（什么时候、以什么方式打扰你——状态卡与系统通知是同一件事的轻重两档）
+        section(alerts, "状态卡", first: true)
         let autoFloat = NSButton(checkboxWithTitle: "有会话等你时自动浮现，回复后收回",
                                  target: self, action: #selector(autoFloatToggled(_:)))
         autoFloat.state = Prefs.hudAutoFloat ? .on : .off
         autoFloat.font = .systemFont(ofSize: 12)
-        look.addArrangedSubview(autoFloat)
+        alerts.addArrangedSubview(autoFloat)
         let float = NSButton(checkboxWithTitle: "置顶悬浮（始终显示在所有窗口之上）",
                              target: self, action: #selector(floatToggled(_:)))
         float.state = Prefs.hudFloat ? .on : .off
         float.font = .systemFont(ofSize: 12)
-        look.addArrangedSubview(float)
+        alerts.addArrangedSubview(float)
         let through = NSButton(checkboxWithTitle: "点击穿透（不响应鼠标，不可拖动）",
                                target: self, action: #selector(throughToggled(_:)))
         through.state = Prefs.hudClickThrough ? .on : .off
         through.font = .systemFont(ofSize: 12)
-        look.addArrangedSubview(through)
-        look.addArrangedSubview(note("拖动状态卡即可放置到任意位置（支持跨屏）；有会话等待时，单击状态卡可直达对应终端。右键状态卡可打开本设置。"))
+        alerts.addArrangedSubview(through)
+        alerts.addArrangedSubview(note("拖动状态卡即可放置到任意位置（支持跨屏）；有会话等待时，单击状态卡可直达对应终端。右键状态卡可打开本设置。"))
 
-        // ---------- 页 3：通知与启动
-        section(general, "通知", first: true)
+        section(alerts, "系统通知")
         let alertsCb = NSButton(checkboxWithTitle: "会话等待超时、或额度超过 80% / 95% 时发送系统通知",
                                 target: self, action: #selector(alertsToggled(_:)))
         alertsCb.state = Prefs.alertsEnabled ? .on : .off
         alertsCb.font = .systemFont(ofSize: 12)
-        general.addArrangedSubview(alertsCb)
+        alerts.addArrangedSubview(alertsCb)
         let thRow = row(); thRow.spacing = 8
         let thLabel = label("等待阈值", size: 12, color: .labelColor)
         thLabel.widthAnchor.constraint(equalToConstant: 64).isActive = true
@@ -317,24 +293,46 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         thPopup.action = #selector(alertMinutesChanged(_:))
         thRow.addArrangedSubview(thLabel)
         thRow.addArrangedSubview(thPopup)
-        general.addArrangedSubview(thRow)
+        alerts.addArrangedSubview(thRow)
         // 系统层面的授权状态：用户在系统弹框点了「不允许」，上面的勾选再亮也一条都收不到——必须说出来并给出口
         let notifRow = row(); notifRow.spacing = 8
         notifStatusLabel = label("…", size: 11, color: .secondaryLabelColor)
         notifActionButton = smallButton("打开系统设置", action: #selector(notifAction))
         notifRow.addArrangedSubview(notifStatusLabel)
         notifRow.addArrangedSubview(notifActionButton)
-        general.addArrangedSubview(notifRow)
+        alerts.addArrangedSubview(notifRow)
         refreshNotificationRow()
-        general.addArrangedSubview(note("每次等待仅通知一次，避免重复打扰。"))
+        alerts.addArrangedSubview(note("每次等待仅通知一次，避免重复打扰。"))
 
-        section(general, "启动")
+        // ---------- 页 3：接入与启动（配一次就不用再来；菜单栏「点击接入」与欢迎面板直达这里）
+        sectionAnchors["quota"] = section(access, "额度（五小时 / 七天用量）", first: true); sectionPage["quota"] = 2
+        quotaStatusLabel = wrappedLabel("…", size: 12, color: .labelColor)
+        access.addArrangedSubview(quotaStatusLabel)
+        let quotaButtons = row()
+        quotaActionButton = smallButton("", action: #selector(quotaActionTapped))
+        quotaButtons.addArrangedSubview(quotaActionButton)
+        quotaButtons.addArrangedSubview(smallButton("打开数据目录", action: #selector(openQuotaDir)))
+        access.addArrangedSubview(quotaButtons)
+        access.addArrangedSubview(note("接入后原状态栏命令原样执行，终端显示不变。接入前自动备份配置，可随时恢复。"))
+        refreshQuotaSection()
+
+        sectionAnchors["hooks"] = section(access, "权限确认状态"); sectionPage["hooks"] = 2
+        hooksStatusLabel = wrappedLabel("…", size: 12, color: .labelColor)
+        access.addArrangedSubview(hooksStatusLabel)
+        let hooksButtons = row()
+        hooksActionButton = smallButton("", action: #selector(hooksActionTapped))
+        hooksButtons.addArrangedSubview(hooksActionButton)
+        access.addArrangedSubview(hooksButtons)
+        access.addArrangedSubview(note("接入后可精确显示「等待确认」并即时通知。接入前自动备份配置，可随时撤销；此项以标准 JSON 重写配置文件，注释不保留。"))
+        refreshHooksSection()
+
+        section(access, "启动")
         let auto = NSButton(checkboxWithTitle: "登录时自动启动 AIDeck",
                             target: self, action: #selector(autostartToggled(_:)))
         auto.state = Autostart.isEnabled ? .on : .off
         auto.font = .systemFont(ofSize: 12)
-        general.addArrangedSubview(auto)
-        general.addArrangedSubview(note("下次登录生效；异常退出时自动重新启动。"))
+        access.addArrangedSubview(auto)
+        access.addArrangedSubview(note("下次登录生效；异常退出时自动重新启动。"))
 
         showPage(0)
 
@@ -409,8 +407,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         box.arrangedSubviews.forEach { box.removeArrangedSubview($0); $0.removeFromSuperview() }
         let skin = app?.currentAnimation ?? ""
         let schema = app?.skinSchema(for: skin) ?? []
+        // 说清楚这组开关属于谁：换皮肤后它们会整组换掉
+        skinPrefsTitle?.stringValue = skin.isEmpty ? "皮肤选项" : "「\(AnimationHost.displayName(skin))」的选项"
         if schema.isEmpty {
-            box.addArrangedSubview(note("当前皮肤没有可调选项。"))
+            box.addArrangedSubview(note("这款皮肤没有可调选项。"))
             return
         }
         let saved = Prefs.skinValues(skin)

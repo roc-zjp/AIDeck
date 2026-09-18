@@ -62,6 +62,12 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
         .appendingPathComponent(".config/live-desktop/skins", isDirectory: true)
     static let userPrefix = "user/"
 
+    /// 文件名 → 给人看的名字：去掉 .html，自定义皮肤标出来源。菜单栏与设置页共用
+    static func displayName(_ file: String) -> String {
+        let base = file.replacingOccurrences(of: ".html", with: "")
+        return base.hasPrefix(userPrefix) ? "自定义 · " + String(base.dropFirst(userPrefix.count)) : base
+    }
+
     var availableAnimations: [String] {
         let bundled = (try? FileManager.default.contentsOfDirectory(atPath: webDirectory.path))?
             .filter { $0.hasSuffix(".html") && $0 != "hud.html" }.sorted() ?? []

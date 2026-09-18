@@ -14,12 +14,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         var state: ClaudeState
         var animations: [String]
         var currentAnimation: String
-        var rendering: Bool
-        var fps: Double
-        var occluded: Bool
-        var coverage: Double
-        var coverageMillis: Double
-        var onBattery: Bool
         var paused: Bool
     }
 
@@ -106,9 +100,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         addStatusRows(menu, state, target)
         addQuotaRow(menu, state, target)
         addSkinRows(menu, ctx, target)
-        addWidgetRows(menu, target)
-        addHudRows(menu, target)
-        addDiagnosticRows(menu, ctx)
         addActionRows(menu, ctx, target)
     }
 
@@ -130,14 +121,21 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                                 + (waitingCount > 0 ? " · \(waitingCount) 个等你输入（图标旁的数字）" : ""),
                                 action: nil, keyEquivalent: ""))
         let order: [ClaudePhase: Int] = [.waiting: 0, .running: 1, .thinking: 2, .idle: 3]
-        for s in state.sessions.sorted(by: {
+        let sorted = state.sessions.sorted(by: {
             (order[$0.phase] ?? 9, $0.kind == "bg" ? 1 : 0) < (order[$1.phase] ?? 9, $1.kind == "bg" ? 1 : 0)
-        }) {
+        })
+        // 与状态卡同一规矩：最多 5 行，超出折叠成一行。菜单栏是哨兵不是清单，会话多时不该把菜单顶穿
+        for s in sorted.prefix(Self.maxSessionRows) {
             var name = (s.nameIsUserSet ? s.name : nil) ?? s.project
             if s.kind == "bg" { name += "（后台）" }
             menu.addItem(NSMenuItem(title: "   \(name)  —  \(HUDView.statusText(s))", action: nil, keyEquivalent: ""))
         }
+        if sorted.count > Self.maxSessionRows {
+            menu.addItem(NSMenuItem(title: "   还有 \(sorted.count - Self.maxSessionRows) 个会话", action: nil, keyEquivalent: ""))
+        }
     }
+
+    private static let maxSessionRows = 5
 
     /// 额度与精细态 hook：没数据也不藏这一行——未接入给入口，已接入说明还在等数据
     private func addQuotaRow(_ menu: NSMenu, _ state: ClaudeState, _ target: AppDelegate) {
@@ -168,93 +166,21 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
+    /// 皮肤是桌面上唯一的高频操作，值得留在菜单栏；但 12 款平铺会占掉一屏，收进子菜单
     private func addSkinRows(_ menu: NSMenu, _ ctx: Context, _ target: AppDelegate) {
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "切换动画", action: nil, keyEquivalent: ""))
+        let root = NSMenuItem(title: "皮肤：" + AnimationHost.displayName(ctx.currentAnimation), action: nil, keyEquivalent: "")
+        let sub = NSMenu()
         for name in ctx.animations {
-            let it = NSMenuItem(title: "   " + name.replacingOccurrences(of: ".html", with: ""),
+            let it = NSMenuItem(title: AnimationHost.displayName(name),
                                 action: #selector(AppDelegate.pickAnimation(_:)), keyEquivalent: "")
             it.target = target
             it.representedObject = name
             it.state = (name == ctx.currentAnimation) ? .on : .off
-            menu.addItem(it)
+            sub.addItem(it)
         }
-    }
-
-    /// 小工具：每个小工具一个子菜单选槽位；事件反应：逐项开关。改动即推给所有皮肤页面
-    private func addWidgetRows(_ menu: NSMenu, _ target: AppDelegate) {
-        menu.addItem(.separator())
-        let widgetRoot = NSMenuItem(title: "小工具", action: nil, keyEquivalent: "")
-        let widgetMenu = NSMenu()
-        let slots = Prefs.widgetSlots
-        for w in Prefs.widgets {
-            let item = NSMenuItem(title: "\(w.name)  ·  \(Prefs.slots.first { $0.id == slots[w.id] }?.name ?? "?")",
-                                  action: nil, keyEquivalent: "")
-            let sub = NSMenu()
-            for s in Prefs.slots {
-                let it = NSMenuItem(title: s.name, action: #selector(AppDelegate.pickWidgetSlot(_:)), keyEquivalent: "")
-                it.target = target
-                it.representedObject = "\(w.id) \(s.id)"
-                it.state = slots[w.id] == s.id ? .on : .off
-                sub.addItem(it)
-            }
-            item.submenu = sub
-            widgetMenu.addItem(item)
-        }
-        widgetRoot.submenu = widgetMenu
-        menu.addItem(widgetRoot)
-
-        let fxRoot = NSMenuItem(title: "事件反应", action: nil, keyEquivalent: "")
-        let fxMenu = NSMenu()
-        let flags = Prefs.reactionFlags
-        for r in Prefs.reactions {
-            let it = NSMenuItem(title: r.name, action: #selector(AppDelegate.toggleReaction(_:)), keyEquivalent: "")
-            it.target = target
-            it.representedObject = r.id
-            it.state = flags[r.id] == true ? .on : .off
-            fxMenu.addItem(it)
-        }
-        fxRoot.submenu = fxMenu
-        menu.addItem(fxRoot)
-    }
-
-    private func addHudRows(_ menu: NSMenu, _ target: AppDelegate) {
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "状态卡位置", action: nil, keyEquivalent: ""))
-        let drag = NSMenuItem(title: "   拖动到任意位置…", action: #selector(AppDelegate.beginHudEdit), keyEquivalent: "")
-        drag.target = target
-        menu.addItem(drag)
-        let float = NSMenuItem(title: "   置顶悬浮（盖在所有窗口之上）",
-                               action: #selector(AppDelegate.toggleHudFloat), keyEquivalent: "")
-        float.target = target
-        float.state = Prefs.hudFloat ? .on : .off
-        menu.addItem(float)
-        let autoFloat = NSMenuItem(title: "   有会话等你时自动浮现",
-                                   action: #selector(AppDelegate.toggleHudAutoFloat), keyEquivalent: "")
-        autoFloat.target = target
-        autoFloat.state = Prefs.hudAutoFloat ? .on : .off
-        menu.addItem(autoFloat)
-        let cur = Prefs.hasFreeHudPosition ? "" : Prefs.hudAnchor
-        for (code, name) in [("tl", "左上"), ("tr", "右上"), ("bl", "左下"), ("br", "右下")] {
-            let it = NSMenuItem(title: "   " + name, action: #selector(AppDelegate.pickHudAnchor(_:)), keyEquivalent: "")
-            it.target = target
-            it.representedObject = code
-            it.state = (code == cur) ? .on : .off
-            menu.addItem(it)
-        }
-    }
-
-    private func addDiagnosticRows(_ menu: NSMenu, _ ctx: Context) {
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: String(format: "渲染 %@ · %.0f fps", ctx.rendering ? "开" : "停", ctx.fps),
-                                action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: String(format: "遮挡 occlusionState=%@ · 覆盖率 %.0f%%",
-                                              ctx.occluded ? "遮住" : "可见", ctx.coverage * 100),
-                                action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: String(format: "探测 %.1fms · 覆盖计算 %.1fms · %@",
-                                              ctx.state.probeMillis, ctx.coverageMillis,
-                                              ctx.onBattery ? "电池" : "外接电源"),
-                                action: nil, keyEquivalent: ""))
+        root.submenu = sub
+        menu.addItem(root)
     }
 
     private func addActionRows(_ menu: NSMenu, _ ctx: Context, _ target: AppDelegate) {

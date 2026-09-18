@@ -375,18 +375,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func buildStatusBar() {
         statusBar = StatusItemController(target: self) { [weak self] in
             guard let self else { return StatusItemController.Context(
-                state: ClaudeState(), animations: [], currentAnimation: "", rendering: false, fps: 0,
-                occluded: false, coverage: 0, coverageMillis: 0, onBattery: false, paused: false) }
+                state: ClaudeState(), animations: [], currentAnimation: "", paused: false) }
             return StatusItemController.Context(
                 state: self.state,
                 animations: self.units.first?.host.availableAnimations ?? [],
                 currentAnimation: self.animation,
-                rendering: self.units.first?.rendering == true,
-                fps: self.units.first?.host.reportedFPS ?? 0,
-                occluded: self.lastOccluded,
-                coverage: self.lastCoverage,
-                coverageMillis: self.coverageMillis,
-                onBattery: self.onBattery,
                 paused: self.manuallyPaused)
         }
     }
@@ -468,27 +461,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings?.reloadSkin(name)
     }
 
-    @objc func pickWidgetSlot(_ sender: NSMenuItem) {
-        guard let s = sender.representedObject as? String else { return }
-        let p = s.split(separator: " ").map(String.init)
-        guard p.count == 2, Prefs.setWidget(p[0], slot: p[1]) else { return }
-        pushPrefs()
-    }
-
-    @objc func toggleReaction(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String else { return }
-        Prefs.setReaction(id, on: sender.state != .on)
-        pushPrefs()
-    }
-
     @objc func togglePause() { manuallyPaused.toggle(); tick() }
-    @objc func beginHudEdit() { hud.beginEdit() }
-    @objc func toggleHudFloat() { hud.setFloating(!Prefs.hudFloat) }
-    @objc func toggleHudAutoFloat() { hud.setAutoFloat(!Prefs.hudAutoFloat) }
-    @objc func pickHudAnchor(_ sender: NSMenuItem) {
-        guard let a = sender.representedObject as? String else { return }
-        hud.setAnchor(a)
-    }
 
     private func cycleAnimation() {
         let all = units.first?.host.availableAnimations ?? []
