@@ -51,7 +51,7 @@ case "${1:-status}" in
 <plist version="1.0"><dict>
   <key>Label</key><string>com.zhoujunpeng.livedesktop</string>
   <key>ProgramArguments</key>
-  <array><string>$DIR/build/LiveDesktopSpike.app/Contents/MacOS/AIDeck</string><string>--log</string></array>
+  <array><string>$DIR/build/AIDeck.app/Contents/MacOS/AIDeck</string><string>--log</string></array>
   <key>WorkingDirectory</key><string>$DIR</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>

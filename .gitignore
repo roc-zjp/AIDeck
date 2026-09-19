@@ -9,8 +9,16 @@ code/spike/status.log
 *.log
 
 .DS_Store
-docs/archive/
+
+# 归档里只有原始对话记录不公开；archive/skins 下的旧皮肤留作参考
+docs/archive/*.jsonl
 
 # 工具残留（Playwright MCP 截图、Python 字节码）
 .playwright-mcp/
 __pycache__/
+
+# 本机 Claude Code 权限配置（因人而异，不进版本库）
+.claude/settings.local.json
+
+# 文章配套视频：GIF 随仓库走（README 与文章要用），mp4 只是公众号上传用的同源文件，本地留着即可
+docs/posts/media/*.mp4
