@@ -113,7 +113,8 @@ Pulse
 需要 macOS 与 Xcode 命令行工具（Swift 6+），没有 Xcode 工程，纯 SPM：
 
 ```bash
-git clone <repo> && cd live-desktop/code/app
+git clone https://github.com/roc-zjp/AIDeck.git
+cd AIDeck/code/app
 ./build.sh          # 编译 + 组 .app + ad-hoc 签名
 ./ld start
 ```
