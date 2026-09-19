@@ -36,7 +36,7 @@ final class DiagLogger {
     private var day = ""                    // 当前 diag.csv 对应的本地日期
     private var path: String { dir + "/diag.csv" }
 
-    /// 目录默认取进程当前工作目录（`./ld start` 从 code/spike 起，diag.csv 就落在那里）
+    /// 目录默认取进程当前工作目录（`./ld start` 从 code/app 起，diag.csv 就落在那里）
     init(directory: String = FileManager.default.currentDirectoryPath) {
         self.dir = directory
     }

@@ -1,5 +1,5 @@
 import XCTest
-@testable import LiveDesktopSpike
+@testable import AIDeck
 
 /// 状态判定规则的真值表测试。
 ///

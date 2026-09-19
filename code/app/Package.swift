@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "LiveDesktopSpike",
+    name: "AIDeck",
     platforms: [.macOS(.v13)],
     targets: [
         .executableTarget(
-            name: "LiveDesktopSpike",
-            path: "Sources/LiveDesktopSpike",
+            name: "AIDeck",
+            path: "Sources/AIDeck",
             swiftSettings: [.unsafeFlags(["-swift-version", "5"])]
         ),
         // statusline 透传 wrapper：随 .app 分发的独立小二进制，不依赖 jq / python
@@ -23,9 +23,9 @@ let package = Package(
             swiftSettings: [.unsafeFlags(["-swift-version", "5"])]
         ),
         .testTarget(
-            name: "LiveDesktopSpikeTests",
-            dependencies: ["LiveDesktopSpike"],
-            path: "Tests/LiveDesktopSpikeTests",
+            name: "AIDeckTests",
+            dependencies: ["AIDeck"],
+            path: "Tests/AIDeckTests",
             swiftSettings: [.unsafeFlags(["-swift-version", "5"])]
         )
     ]

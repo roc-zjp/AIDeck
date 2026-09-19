@@ -113,7 +113,7 @@ Pulse
 需要 macOS 与 Xcode 命令行工具（Swift 6+），没有 Xcode 工程，纯 SPM：
 
 ```bash
-git clone <repo> && cd live-desktop/code/spike
+git clone <repo> && cd live-desktop/code/app
 ./build.sh          # 编译 + 组 .app + ad-hoc 签名
 ./ld start
 ```
@@ -177,4 +177,4 @@ __ld.declarePrefs([
 
 MIT，见 [LICENSE](LICENSE)。
 
-随仓库分发的 Three.js 与 Draco 解码器按其各自的许可证提供，见 [`code/spike/Resources/web/THIRD-PARTY.md`](code/spike/Resources/web/THIRD-PARTY.md)。
+随仓库分发的 Three.js 与 Draco 解码器按其各自的许可证提供，见 [`code/app/Resources/web/THIRD-PARTY.md`](code/app/Resources/web/THIRD-PARTY.md)。

@@ -1,6 +1,6 @@
 #!/bin/bash
 # 组装成 .app —— WKWebView 需要 bundle identifier，裸可执行文件跑不起来。
-# 产品显示名 AIDeck（.app 与可执行名 = AIDeck；SPM target 仍叫 LiveDesktopSpike，是纯内部构建标识）。
+# 产品名、SPM target、.app 与可执行名统一为 AIDeck。
 # 分发：LD_UNIVERSAL=1 出双架构；LD_SIGN_IDENTITY="Developer ID Application: …" 走正式签名（再 notarize）。
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -17,7 +17,7 @@ fi
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BINDIR/LiveDesktopSpike" "$APP/Contents/MacOS/AIDeck"           # 主程序，更名为 AIDeck
+cp "$BINDIR/AIDeck" "$APP/Contents/MacOS/AIDeck"           # 主程序，更名为 AIDeck
 cp "$BINDIR/LdStatusline" "$APP/Contents/MacOS/ld-statusline"        # statusline 透传 wrapper，随包分发
 cp "$BINDIR/LdHook" "$APP/Contents/MacOS/ld-hook"                    # Notification hook 监听器，随包分发
 cp Info.plist "$APP/Contents/"

@@ -1,5 +1,5 @@
 import XCTest
-@testable import LiveDesktopSpike
+@testable import AIDeck
 
 /// 两组解析规则的边界。都是纯函数——**不碰 UserDefaults**，
 /// 否则测试会写进开发机真实的偏好域（Prefs 的存取器有意不在这里测）。
