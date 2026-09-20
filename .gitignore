@@ -10,8 +10,11 @@ code/app/status.log
 
 .DS_Store
 
-# 归档里只有原始对话记录不公开；archive/skins 下的旧皮肤留作参考
-docs/archive/*.jsonl
+# 内部文档不进公开仓库：设计决策、踩坑记录、产品定义、交接说明、给 AI 的项目指令。
+# 这些文件仍然留在本地工作区（CLAUDE.md 必须在根目录才对 Claude Code 生效），只是不对外发布。
+docs/
+HANDOFF.md
+CLAUDE.md
 
 # 工具残留（Playwright MCP 截图、Python 字节码）
 .playwright-mcp/
@@ -20,5 +23,4 @@ __pycache__/
 # 本机 Claude Code 权限配置（因人而异，不进版本库）
 .claude/settings.local.json
 
-# 文章配套视频：GIF 随仓库走（README 与文章要用），mp4 只是公众号上传用的同源文件，本地留着即可
-docs/posts/media/*.mp4
+# 文章配套的 mp4（公众号上传用）不进仓库；README 用的 GIF 在 assets/ 下正常跟踪

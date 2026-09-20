@@ -2,7 +2,7 @@
 
 **把 Claude Code 的运行状态画在 macOS 桌面上。** 不切回终端，也知道哪个会话在跑、哪个在等你、额度还剩多少。
 
-![JARVIS](docs/posts/media/jarvis.gif)
+![JARVIS](assets/jarvis.gif)
 
 ## 安装
 
@@ -52,47 +52,47 @@ cd AIDeck/code/app
 
 Radar
 
-![Radar](docs/posts/media/radar.gif)
+![Radar](assets/radar.gif)
 
 Basketball — 普通跳投 = 一个回合完成，庆祝动作 = 一次 git commit，记分牌上的 SCORE 是本次运行的真实 commit 数
 
-![Basketball](docs/posts/media/basketball.gif)
+![Basketball](assets/basketball.gif)
 
 Matrix
 
-![Matrix](docs/posts/media/matrix.gif)
+![Matrix](assets/matrix.gif)
 
 Hologram
 
-![Hologram](docs/posts/media/hologram.gif)
+![Hologram](assets/hologram.gif)
 
 Globe
 
-![Globe](docs/posts/media/globe.gif)
+![Globe](assets/globe.gif)
 
 Circuit
 
-![Circuit](docs/posts/media/circuit.gif)
+![Circuit](assets/circuit.gif)
 
 Warp
 
-![Warp](docs/posts/media/warp.gif)
+![Warp](assets/warp.gif)
 
 Bounce
 
-![Bounce](docs/posts/media/bounce.gif)
+![Bounce](assets/bounce.gif)
 
 Aurora
 
-![Aurora](docs/posts/media/aurora.gif)
+![Aurora](assets/aurora.gif)
 
 Neural
 
-![Neural](docs/posts/media/neural.gif)
+![Neural](assets/neural.gif)
 
 Pulse
 
-![Pulse](docs/posts/media/pulse.gif)
+![Pulse](assets/pulse.gif)
 
 </details>
 
@@ -160,7 +160,3 @@ __ld.declarePrefs([
 ## License
 
 MIT，见 [LICENSE](LICENSE)。随仓库分发的 Three.js 与 Draco 按其各自许可证提供，见 [THIRD-PARTY.md](code/app/Resources/web/THIRD-PARTY.md)。
-
----
-
-<sub>设计决策与开发笔记在 [`docs/`](docs/) 下，用不着，感兴趣可以翻。</sub>
