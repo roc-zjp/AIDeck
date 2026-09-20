@@ -1,8 +1,26 @@
 # AIDeck
 
-**把 Claude Code 的运行状态画在 macOS 桌面上。** 不切回终端，也知道哪个会话在跑、哪个在等你、额度还剩多少。
+## Vibe Coding 时代，你喜欢哪一种桌面氛围？
 
-![JARVIS](assets/jarvis.gif)
+AIDeck 把 Claude Code 的运行状态变成 macOS 桌面上的动态氛围。不用切回终端，也能一眼看出哪个会话正在思考、执行工具，或是等你输入。
+
+12 款主题，12 种进入心流的方式。它们不只是壁纸：动画、色彩和节奏都会跟着真实的 Claude Code 会话变化。
+
+| **JARVIS** · 反应堆环与未来感信息面板 | **Radar** · 会话化作回波，越久没有输出就离中心越远 |
+|---|---|
+| ![JARVIS 主题动画](assets/jarvis.gif) | ![Radar 主题动画](assets/radar.gif) |
+| **Matrix** · 代码雨中穿过真实的工具名与分支名 | **Globe** · 每个会话都有一条属于自己的环绕轨道 |
+| ![Matrix 主题动画](assets/matrix.gif) | ![Globe 主题动画](assets/globe.gif) |
+| **Circuit** · 工具调用沿电路奔流，迸出白热电子 | **Warp** · 状态决定航速，切换状态就是一次跃迁 |
+| ![Circuit 主题动画](assets/circuit.gif) | ![Warp 主题动画](assets/warp.gif) |
+| **Hologram** · 把你喜欢的 3D 模型放上全息投影台 | **Basketball** · 回合完成就跳投，git commit 触发庆祝 |
+| ![Hologram 主题动画](assets/hologram.gif) | ![Basketball 主题动画](assets/basketball.gif) |
+| **Bounce** · 每次工具调用都会多一颗零重力弹球 | **Aurora** · 柔和流动的极光，把状态变化铺满桌面 |
+| ![Bounce 主题动画](assets/bounce.gif) | ![Aurora 主题动画](assets/aurora.gif) |
+| **Neural** · 神经网络随思考与执行持续生长、发光 | **Pulse** · 极简呼吸脉冲，也是最轻量省电的选择 |
+| ![Neural 主题动画](assets/neural.gif) | ![Pulse 主题动画](assets/pulse.gif) |
+
+> 动图录自演示环境，画面里的会话名与项目名都是演示数据。
 
 ## 安装
 
@@ -35,68 +53,7 @@ cd AIDeck/code/app
 
 桌面被窗口完全盖住时动画会**自动停止渲染**（实测 0fps），屏保、息屏、锁屏期间同样。连续 76 小时的运行数据里，动画实际在渲染的时间占 4.9%。
 
-## 12 款主题
-
-在设置窗口里点一下就能换，或者 `./ld next` 轮换。
-
-| | |
-|---|---|
-| **JARVIS** 反应堆环 + 信息面板 | **Radar** 会话是回波点，离心距离 = 多久没输出 |
-| **Matrix** 雨里混着真实的工具名和分支名 | **Globe** 每个会话一条绕球轨道 |
-| **Circuit** 电子沿电路流动，工具调用炸出白热电子 | **Warp** 星场航速随状态，切换即跃迁 |
-| **Hologram** 3D 投影台，可换成你自己的模型 | **Basketball** 数字人练干拔，commit 时庆祝 |
-| **Bounce** 每次工具调用多一颗零重力弹球 | **Aurora / Neural / Pulse** 纯氛围，Pulse 最省电 |
-
-<details>
-<summary>展开看全部 12 款动图</summary>
-
-Radar
-
-![Radar](assets/radar.gif)
-
-Basketball — 普通跳投 = 一个回合完成，庆祝动作 = 一次 git commit，记分牌上的 SCORE 是本次运行的真实 commit 数
-
-![Basketball](assets/basketball.gif)
-
-Matrix
-
-![Matrix](assets/matrix.gif)
-
-Hologram
-
-![Hologram](assets/hologram.gif)
-
-Globe
-
-![Globe](assets/globe.gif)
-
-Circuit
-
-![Circuit](assets/circuit.gif)
-
-Warp
-
-![Warp](assets/warp.gif)
-
-Bounce
-
-![Bounce](assets/bounce.gif)
-
-Aurora
-
-![Aurora](assets/aurora.gif)
-
-Neural
-
-![Neural](assets/neural.gif)
-
-Pulse
-
-![Pulse](assets/pulse.gif)
-
-</details>
-
-> 动图录自演示环境，画面里的会话名与项目名都是演示数据。
+想换一种氛围时，在设置窗口里点一下主题即可，或者运行 `./ld next` 轮换。
 
 ## 桌面四周的信息面板
 
