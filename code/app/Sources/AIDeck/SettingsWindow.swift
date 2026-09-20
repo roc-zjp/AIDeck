@@ -16,6 +16,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var hooksStatusLabel: NSTextField!
     private var hooksActionButton: NSButton!
     private var hooksInstalled = false
+    private var hudSubOptions: [NSButton] = []    // 状态卡总开关关掉后一并灰掉的下属选项
+    private var hudNote: NSTextField?
     private var scrollView: NSScrollView!
     private var sectionAnchors: [String: NSView] = [:]     // 深链接：菜单 / 欢迎面板直达某区块
     private var sectionPage: [String: Int] = [:]           // 区块在哪一页
@@ -234,6 +236,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
         // ---------- 页 2：提醒（什么时候、以什么方式打扰你——状态卡与系统通知是同一件事的轻重两档）
         section(alerts, "状态卡", first: true)
+        let visible = NSButton(checkboxWithTitle: "在桌面显示状态卡",
+                               target: self, action: #selector(hudVisibleToggled(_:)))
+        visible.state = Prefs.hudVisible ? .on : .off
+        visible.font = .systemFont(ofSize: 12)
+        alerts.addArrangedSubview(visible)
         let autoFloat = NSButton(checkboxWithTitle: "有会话等你时自动浮现，回复后收回",
                                  target: self, action: #selector(autoFloatToggled(_:)))
         autoFloat.state = Prefs.hudAutoFloat ? .on : .off
@@ -249,7 +256,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         through.state = Prefs.hudClickThrough ? .on : .off
         through.font = .systemFont(ofSize: 12)
         alerts.addArrangedSubview(through)
-        alerts.addArrangedSubview(note("拖动状态卡即可放置到任意位置（支持跨屏）；有会话等待时，单击状态卡可直达对应终端。右键状态卡可打开本设置。"))
+        // 关掉总开关后，下面三项全是对一张不存在的卡的设置——灰掉，别让人以为改了没生效
+        hudSubOptions = [autoFloat, float, through]
+        hudNote = note("拖动状态卡即可放置到任意位置（支持跨屏）；有会话等待时，单击状态卡可直达对应终端。右键状态卡可打开本设置。")
+        alerts.addArrangedSubview(hudNote!)
+        refreshHudSection()
 
         section(alerts, "系统通知")
         let alertsCb = NSButton(checkboxWithTitle: "会话等待超时、或额度超过 80% / 95% 时发送系统通知",
@@ -606,6 +617,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         guard let id = sender.identifier?.rawValue else { return }
         Prefs.setReaction(id, on: sender.state == .on)
         app?.pushPrefs()
+    }
+
+    @objc private func hudVisibleToggled(_ sender: NSButton) {
+        app?.setHudVisible(sender.state == .on)
+        refreshHudSection()
+    }
+
+    /// 总开关关掉时，下属三项与说明文字一起改口——设置页不该留下「改了却没生效」的选项
+    private func refreshHudSection() {
+        let on = Prefs.hudVisible
+        hudSubOptions.forEach { $0.isEnabled = on }
+        hudNote?.stringValue = on
+            ? "拖动状态卡即可放置到任意位置（支持跨屏）；有会话等待时，单击状态卡可直达对应终端。右键状态卡可打开本设置。"
+            : "状态卡已关闭，桌面上不再显示。会话状态仍可在菜单栏图标与系统通知中查看；重新打开勾选上方选项即可，或在终端执行 ./ld hud on。"
     }
 
     @objc private func floatToggled(_ sender: NSButton) {

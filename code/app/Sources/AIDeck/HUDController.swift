@@ -21,9 +21,9 @@ final class HUDController {
         self.onOpenSettings = onOpenSettings
         view.autoresizingMask = [.width, .height]
         window.contentView = view
-        window.setFloating(Prefs.hudFloat)
+        window.setHidden(!Prefs.hudVisible)      // 先定显隐：关着的话别先亮一帧再收走
+        window.setFloating(Prefs.hudFloat)       // 内部 applyLevel 负责 orderFront / orderOut
         window.setClickThrough(Prefs.hudClickThrough)
-        window.orderFront(nil)
     }
 
     func close() { window.close() }
@@ -33,6 +33,7 @@ final class HUDController {
     /// 刷新内容与尺寸，并判断按需浮现。由 AppDelegate.tick 驱动
     func update(_ state: ClaudeState) {
         self.state = state
+        guard Prefs.hudVisible else { return }   // 总开关关着：不画、不量尺寸、不判浮现
         view.update(state)
         let newSize = view.cardSize
         if newSize != size {
@@ -112,6 +113,7 @@ final class HUDController {
 
     func handleMouse(at p: CGPoint, leftDown: Bool, rightDown: Bool) {
         defer { wasLeft = leftDown; wasRight = rightDown }
+        guard Prefs.hudVisible else { return }         // 卡不在桌面上，就不该有任何命中判定
 
         // 鼠标从长时间静止转为活动 = 人回来了：给按需浮现一次重新展示的机会（决策 011）
         if p != lastMousePos || leftDown {
@@ -168,7 +170,26 @@ final class HUDController {
         log("[hud] 单击直达 \(target.project)（pid \(target.pid)）")
     }
 
-    // MARK: - 层级偏好
+    // MARK: - 显示与层级偏好
+
+    /// 总开关：关掉即把卡从桌面撤走（三层感知只剩菜单栏与系统通知），打开时按当前偏好重新落位。
+    /// 关闭时把按需浮现的状态一并清干净，否则下次打开会带着上一轮的「已浮现过」记录
+    func setVisible(_ on: Bool) {
+        Prefs.setHudVisible(on)
+        window.setHidden(!on)
+        if on {
+            view.update(state)                 // 关闭期间 update 是空转的，打开时先补一帧再定尺寸
+            size = view.cardSize
+            window.setContentSize(size)
+            layout()
+        } else {
+            elevated = false
+            elevationDeadline = nil
+            elevationShown.removeAll()
+            window.setElevated(false)
+        }
+        log("[hud] 状态卡\(on ? "显示" : "隐藏")")
+    }
 
     func setClickThrough(_ on: Bool) {
         Prefs.setHudClickThrough(on)
@@ -235,7 +256,7 @@ final class HUDController {
     private var moveObserver: Any?
 
     func beginEdit() {
-        guard !editing else { return }
+        guard !editing, Prefs.hudVisible else { return }   // 关着的卡没有「找回来」这回事
         editing = true
         window.setEditing(true); view.setDragging(true)
         moveObserver = NotificationCenter.default.addObserver(
@@ -270,7 +291,7 @@ final class HUDController {
     func selftestLine() -> String? {
         guard let home = homeScreen() else { return nil }
         let f = window.frame
-        return "[selftest HUD窗] 家屏\(ScreenUnit.displayID(of: home)) 窗口=\(Int(f.width))x\(Int(f.height)) @\(Int(f.minX)),\(Int(f.minY)) 屏内偏移=\(Int(f.minX - home.frame.minX)),\(Int(f.minY - home.frame.minY)) 显示器=\(NSScreen.screens.count) 状态卡窗口数=\(NSApp.windows.filter { $0 is HUDWindow }.count)"
+        return "[selftest HUD窗] 显示=\(Prefs.hudVisible ? "开" : "关") 在屏=\(window.isVisible) 家屏\(ScreenUnit.displayID(of: home)) 窗口=\(Int(f.width))x\(Int(f.height)) @\(Int(f.minX)),\(Int(f.minY)) 屏内偏移=\(Int(f.minX - home.frame.minX)),\(Int(f.minY - home.frame.minY)) 显示器=\(NSScreen.screens.count) 状态卡窗口数=\(NSApp.windows.filter { $0 is HUDWindow }.count)"
     }
 
     private func log(_ s: String) {

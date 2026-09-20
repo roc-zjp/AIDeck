@@ -279,6 +279,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // 状态卡的对外入口（菜单栏 / 设置页 / ./ld 命令共用），实现都在 HUDController
+    func setHudVisible(_ on: Bool) { hud.setVisible(on) }
     func setClickThrough(_ on: Bool) { hud.setClickThrough(on) }
     func setHudFloat(_ on: Bool) { hud.setFloating(on) }
     func setHudAutoFloat(_ on: Bool) { hud.setAutoFloat(on) }
@@ -297,6 +298,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case "hud":
                 let arg = parts.count > 1 ? parts[1] : "br"
                 switch arg {
+                case "on":      setHudVisible(true)
+                case "off":     setHudVisible(false)
                 case "edit":    hud.beginEdit()
                 case "through": setClickThrough(true)
                 case "drag":    setClickThrough(false)

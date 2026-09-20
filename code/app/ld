@@ -9,6 +9,10 @@ case "${1:-status}" in
   next)   [ -n "$PID" ] && kill -USR2 "$PID" && echo "已切换到下一个动画" || echo "未运行";;
   hud)    if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi
           case "${2:-}" in
+            on)          echo "hud on" >> ~/.live-desktop.cmd
+                         echo "状态卡已显示（位置与其余设置照旧）";;
+            off)         echo "hud off" >> ~/.live-desktop.cmd
+                         echo "状态卡已隐藏：桌面上不再显示，菜单栏与系统通知不受影响（./ld hud on 打开）";;
             tl|tr|bl|br) echo "hud $2" >> ~/.live-desktop.cmd
                          echo "状态卡已吸附到 $2（tl左上 tr右上 bl左下 br右下）";;
             float)       echo "hud float" >> ~/.live-desktop.cmd
@@ -26,7 +30,7 @@ case "${1:-status}" in
                          echo "已进入拖动模式：状态卡临时浮到最上层并高亮"
                          echo "→ 直接按住它拖到想要的位置，松手静止 1.5 秒即保存"
                          echo "→ 完全不动则 20 秒后自动退出，位置不变";;
-            *) echo "用法: ./ld hud [tl|tr|bl|br|edit|float|desktop|auto on|off|through|drag]";;
+            *) echo "用法: ./ld hud [on|off|tl|tr|bl|br|edit|float|desktop|auto on|off|through|drag]";;
           esac;;
   pause)  [ -n "$PID" ] && kill -USR1 "$PID" && echo "已切换暂停/恢复" || echo "未运行";;
   settings) if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi

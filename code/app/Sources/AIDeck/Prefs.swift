@@ -100,7 +100,15 @@ enum Prefs {
         return true
     }
 
-    // MARK: - 状态卡：层级与交互
+    // MARK: - 状态卡：显示、层级与交互
+
+    /// 总开关：关掉后桌面上不再有这张卡，三层感知（决策 003）只剩菜单栏与系统通知。
+    /// 默认开；关掉时窗口下线但位置与层级偏好照旧保留，再打开即回原处
+    static var hudVisible: Bool {
+        UserDefaults.standard.object(forKey: "hudVisible") == nil
+            ? true : UserDefaults.standard.bool(forKey: "hudVisible")
+    }
+    static func setHudVisible(_ on: Bool) { UserDefaults.standard.set(on, forKey: "hudVisible") }
 
     /// 常驻置顶悬浮（盖在所有窗口之上）。与按需浮现（hudAutoFloat）互不覆盖，任一生效即抬层
     static var hudFloat: Bool { UserDefaults.standard.bool(forKey: "hudFloat") }

@@ -25,6 +25,7 @@ final class HUDWindow: NSWindow {
     private var normalLevel: NSWindow.Level = .normal
     private var userFloat = false     // 常驻置顶（用户偏好，./ld hud float）
     private var elevated = false      // 按需浮现（决策 011）：有会话等你时宿主临时抬起
+    private var hidden = false        // 总开关关闭（用户偏好，./ld hud off）：窗口下线，但位置与层级照常维护
 
     init() {
         super.init(contentRect: CGRect(x: 0, y: 0, width: 260, height: 100),
@@ -52,6 +53,10 @@ final class HUDWindow: NSWindow {
     /// 按需浮现（决策 011）：有会话等你时由宿主临时抬到悬浮层，回复后放下；与常驻置顶偏好互不覆盖
     func setElevated(_ on: Bool) { elevated = on; applyLevel() }
 
+    /// 总开关：关掉即窗口下线（不是缩到看不见，是真的不在屏幕上）。
+    /// 偏好与位置都不动，再打开回到原处；此后一切 orderFront 都要先过 hidden 这道闸
+    func setHidden(_ on: Bool) { hidden = on; applyLevel() }
+
     /// 常驻置顶或按需浮现任一生效即上浮。
     /// 编辑模式进行中不动 level，结束时 setEditing(false) 会回到这里算出的 normalLevel。
     private func applyLevel() {
@@ -59,6 +64,7 @@ final class HUDWindow: NSWindow {
         normalLevel = on ? .floating : NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
         collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, on ? .fullScreenAuxiliary : .fullScreenNone]
         if level != .floating || !on { level = normalLevel }
+        guard !hidden else { orderOut(nil); return }
         if on { orderFrontRegardless() } else { orderFront(nil) }
     }
 
@@ -80,7 +86,7 @@ final class HUDWindow: NSWindow {
             level = normalLevel
             let through = Prefs.hudClickThrough
             setClickThrough(through)
-            orderFront(nil)
+            if hidden { orderOut(nil) } else { orderFront(nil) }
         }
     }
 

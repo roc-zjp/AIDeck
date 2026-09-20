@@ -8,8 +8,9 @@ APP="build/AIDeck.app"
 VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Info.plist)
 BUILD=$(/usr/libexec/PlistBuddy -c "Print CFBundleVersion" Info.plist)
 ARCH_TAG="universal"
-SIGN_TAG="adhoc"; [ -n "${LD_SIGN_IDENTITY:-}" ] && SIGN_TAG="signed"
-OUT="build/AIDeck-${VERSION}-${BUILD}-${ARCH_TAG}-${SIGN_TAG}.dmg"
+# 未签名不在文件名里加后缀（下载者不需要这个信息，签名状态写在包内说明里）；正式签名包才标出来
+SIGN_TAG=""; [ -n "${LD_SIGN_IDENTITY:-}" ] && SIGN_TAG="-signed"
+OUT="build/AIDeck-${VERSION}.${BUILD}-${ARCH_TAG}${SIGN_TAG}.dmg"
 
 LD_UNIVERSAL=1 ./build.sh
 echo "架构：$(lipo -archs "$APP/Contents/MacOS/AIDeck")"
@@ -17,16 +18,16 @@ echo "架构：$(lipo -archs "$APP/Contents/MacOS/AIDeck")"
 STAGE=$(mktemp -d)
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
-if [ "$SIGN_TAG" = "adhoc" ]; then
-  # 内测说明：ad-hoc 签名没过公证，收件人第一次打开必须绕 Gatekeeper
-  cat > "$STAGE/内测说明.txt" <<'TXT'
-AIDeck 内测版
+if [ -z "${LD_SIGN_IDENTITY:-}" ]; then   # 未经公证的包才需要教用户绕 Gatekeeper
+  # 使用说明：ad-hoc 签名没过公证，第一次打开必须绕 Gatekeeper
+  cat > "$STAGE/使用说明.txt" <<'TXT'
+AIDeck 使用说明
 
 安装
   将 AIDeck 拖入 Applications 文件夹。
 
 首次打开
-  本版本为内测签名，未经 Apple 公证，首次打开时 macOS 会提示"无法验证开发者"。
+  本版本未经 Apple 公证（需要 Developer ID），首次打开时 macOS 会提示"无法验证开发者"。
   请在 Applications 中右键点击 AIDeck，选择「打开」，再次确认即可；此后可正常双击启动。
   或：系统设置 → 隐私与安全性 → 点击「仍要打开」。
 
@@ -48,4 +49,4 @@ hdiutil create -volname "AIDeck" -srcfolder "$STAGE" -ov -format UDZO -quiet "$O
 rm -rf "$STAGE"
 [ -n "${LD_SIGN_IDENTITY:-}" ] && codesign --force --timestamp -s "$LD_SIGN_IDENTITY" "$OUT"
 echo "✅ $OUT  ($(du -h "$OUT" | cut -f1))"
-[ "$SIGN_TAG" = "adhoc" ] && echo "   ad-hoc 内测包：收件人首次需右键→打开；公开分发请用 Developer ID 签名并公证"
+[ -z "${LD_SIGN_IDENTITY:-}" ] && echo "   ad-hoc 内测包：收件人首次需右键→打开；公开分发请用 Developer ID 签名并公证"
