@@ -12,8 +12,13 @@ from datetime import datetime, timezone
 
 LONG_WAIT = 3600          # 超过 1 小时的「等你输入」视为过夜 / 离机，不参与判据 2 的平均
 
-here = os.path.dirname(os.path.abspath(__file__))
-files = sorted(glob.glob(os.path.join(here, 'diag-*.csv'))) + [os.path.join(here, 'diag.csv')]
+# 诊断日志固定在 ~/Library/Logs/AIDeck/（DiagLogger.defaultDirectory）；
+# 2026-10-09 之前落在本脚本所在目录（进程 cwd），老数据原地不动，一并读进来
+LOG_DIR = os.path.expanduser('~/Library/Logs/AIDeck')
+LEGACY_DIR = os.path.dirname(os.path.abspath(__file__))
+files = []
+for d in (LEGACY_DIR, LOG_DIR):
+    files += sorted(glob.glob(os.path.join(d, 'diag-*.csv'))) + [os.path.join(d, 'diag.csv')]
 files = [f for f in files if os.path.exists(f)]
 if not files:
     print("还没有数据，先让它跑一段时间（./ld start 默认带 --log）")
@@ -24,6 +29,7 @@ for f in files:
     with open(f, newline='') as fh:
         # 崩溃 / 断电可能留下半行（ts 为空或被截断），跳过
         rows.extend(r for r in csv.DictReader(fh) if r.get('phase') and len(r.get('ts') or '') >= 13)
+rows.sort(key=lambda r: r['ts'])   # 新旧两个目录的数据可能交错；ISO8601 同时区字典序即时间序
 if not rows:
     print("还没有数据")
     sys.exit()

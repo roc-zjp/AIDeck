@@ -36,9 +36,14 @@ final class DiagLogger {
     private var day = ""                    // 当前 diag.csv 对应的本地日期
     private var path: String { dir + "/diag.csv" }
 
-    /// 目录默认取进程当前工作目录（`./ld start` 从 code/app 起，diag.csv 就落在那里）
-    init(directory: String = FileManager.default.currentDirectoryPath) {
+    /// 固定落 ~/Library/Logs/AIDeck/。以前取进程当前工作目录：从 Finder / launchd 启动时 cwd 是 `/`，
+    /// 不可写，诊断就悄悄停了；`./ld report` / `./ld status` 读的也是这里
+    static let defaultDirectory = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/AIDeck", isDirectory: true).path
+
+    init(directory: String = DiagLogger.defaultDirectory) {
         self.dir = directory
+        try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
     }
 
     /// 打开当日文件并接上（上次运行留下的若属更早日期，先归档）。失败不抛——诊断停用，主功能不受影响

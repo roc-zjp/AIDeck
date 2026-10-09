@@ -29,7 +29,6 @@ enum Autostart {
 
     static func enable() throws {
         let exe = Bundle.main.executablePath ?? CommandLine.arguments[0]
-        let cwd = FileManager.default.currentDirectoryPath
         let logPath = stderrLogURL.path
         // StandardErrorPath 的目录必须先存在，否则 launchd 静默丢弃重定向
         try? FileManager.default.createDirectory(at: stderrLogURL.deletingLastPathComponent(),
@@ -41,7 +40,6 @@ enum Autostart {
           <key>Label</key><string>\(label)</string>
           <key>ProgramArguments</key>
           <array><string>\(exe)</string><string>--log</string></array>
-          <key>WorkingDirectory</key><string>\(cwd)</string>
           <key>StandardErrorPath</key><string>\(logPath)</string>
           <key>RunAtLoad</key><true/>
           <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>

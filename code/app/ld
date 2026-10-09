@@ -3,30 +3,39 @@
 cd "$(dirname "$0")"
 APP=./build/AIDeck.app/Contents/MacOS/AIDeck
 PID=$(pgrep -f "MacOS/AIDeck" | head -1)
+LOGDIR=~/Library/Logs/AIDeck                       # 诊断日志（DiagLogger.defaultDirectory）
+CMDDIR="${LIVE_DESKTOP_DIR:-$HOME/.config/live-desktop}/cmd"   # 命令队列（AppDelegate.cmdDir；LIVE_DESKTOP_DIR 仅供沙箱测试）
+# 发一条命令给运行中的 App：先写点开头的临时文件，再 mv 成 <定宽微秒时间戳>.cmd——mv 原子，App 只会看到完整文件
+send() {
+  mkdir -p "$CMDDIR"
+  local tmp="$CMDDIR/.tmp.$$" name
+  name=$(perl -MTime::HiRes=time -e 'printf "%017.6f", time')
+  printf '%s\n' "$*" > "$tmp" && mv "$tmp" "$CMDDIR/$name.$$.cmd"
+}
 case "${1:-status}" in
   start)  pkill -f MacOS/AIDeck 2>/dev/null; sleep 1
           nohup $APP --log >/dev/null 2>status.log & sleep 2; echo "已启动 pid=$(pgrep -f MacOS/AIDeck|head -1)";;
   next)   [ -n "$PID" ] && kill -USR2 "$PID" && echo "已切换到下一个动画" || echo "未运行";;
   hud)    if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi
           case "${2:-}" in
-            on)          echo "hud on" >> ~/.live-desktop.cmd
+            on)          send "hud on"
                          echo "状态卡已显示（位置与其余设置照旧）";;
-            off)         echo "hud off" >> ~/.live-desktop.cmd
+            off)         send "hud off"
                          echo "状态卡已隐藏：桌面上不再显示，菜单栏与系统通知不受影响（./ld hud on 打开）";;
-            tl|tr|bl|br) echo "hud $2" >> ~/.live-desktop.cmd
+            tl|tr|bl|br) send "hud $2"
                          echo "状态卡已吸附到 $2（tl左上 tr右上 bl左下 br右下）";;
-            float)       echo "hud float" >> ~/.live-desktop.cmd
+            float)       send "hud float"
                          echo "状态卡已置顶悬浮：盖在所有应用窗口之上（低于菜单栏与 Dock），全屏 App 里也可见";;
-            desktop)     echo "hud desktop" >> ~/.live-desktop.cmd
+            desktop)     send "hud desktop"
                          echo "状态卡回到桌面图标层之上：只在桌面露出时可见";;
             auto)        case "${3:-}" in
-                           on|off) echo "hud auto $3" >> ~/.live-desktop.cmd
+                           on|off) send "hud auto $3"
                                    echo "有会话等你时自动浮现：$3（决策 011，默认开）";;
                            *) echo "用法: ./ld hud auto on|off"; exit 1;;
                          esac;;
-            through)     echo "hud through" >> ~/.live-desktop.cmd; echo "状态卡已点击穿透（不可拖，./ld hud drag 换回）";;
-            drag)        echo "hud drag" >> ~/.live-desktop.cmd; echo "状态卡可直接拖动";;
-            edit|move|"") echo "hud edit" >> ~/.live-desktop.cmd
+            through)     send "hud through"; echo "状态卡已点击穿透（不可拖，./ld hud drag 换回）";;
+            drag)        send "hud drag"; echo "状态卡可直接拖动";;
+            edit|move|"") send "hud edit"
                          echo "已进入拖动模式：状态卡临时浮到最上层并高亮"
                          echo "→ 直接按住它拖到想要的位置，松手静止 1.5 秒即保存"
                          echo "→ 完全不动则 20 秒后自动退出，位置不变";;
@@ -34,10 +43,10 @@ case "${1:-status}" in
           esac;;
   pause)  [ -n "$PID" ] && kill -USR1 "$PID" && echo "已切换暂停/恢复" || echo "未运行";;
   settings) if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi
-          echo "settings" >> ~/.live-desktop.cmd; echo "设置窗口已打开（实时预览 + 小工具槽位 + 事件反应 + 状态卡）";;
+          send "settings"; echo "设置窗口已打开（实时预览 + 小工具槽位 + 事件反应 + 状态卡）";;
   stop)   pkill -f MacOS/AIDeck && echo "已退出";;
   celebrate) if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi
-          echo "celebrate" >> ~/.live-desktop.cmd
+          send "celebrate"
           echo "已触发一次庆祝动作（篮球皮肤：全场闪光 + 投篮 + 记分牌 SCORE +1；预览用，不动 git）";;
   demo)   if [ -n "$PID" ]; then
             pkill -f "ld-demo-loop" 2>/dev/null
@@ -46,25 +55,17 @@ case "${1:-status}" in
             echo "现在把窗口最小化（或 F11 / 四指张开显示桌面），坐着看完三个"
           else echo "未运行，先 ./ld start"; fi;;
   autostart)
+          # plist 只由 App 生成（Autostart.swift），与设置页开关同一份内容；这里只负责 launchctl 登记
           PLIST=~/Library/LaunchAgents/com.zhoujunpeng.livedesktop.plist
           case "${2:-on}" in
-            on)  DIR="$(pwd)"
-                 cat > "$PLIST" <<PL
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>com.zhoujunpeng.livedesktop</string>
-  <key>ProgramArguments</key>
-  <array><string>$DIR/build/AIDeck.app/Contents/MacOS/AIDeck</string><string>--log</string></array>
-  <key>WorkingDirectory</key><string>$DIR</string>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-</dict></plist>
-PL
+            on)  $APP --autostart on || exit 1
                  launchctl unload "$PLIST" 2>/dev/null
-                 launchctl load "$PLIST" && echo "已设为开机自启，并接管保活（崩了会自动拉起）"
+                 # 手动 ./ld start 起的实例不归 launchd 管：先停掉，否则 load 会再拉起一个，桌面上叠两套
+                 [ -n "$PID" ] && { pkill -f MacOS/AIDeck; sleep 1; }
+                 launchctl load "$PLIST" && echo "已设为开机自启，并由 launchd 接管保活（崩了会自动拉起）"
                  echo "关闭：./ld autostart off";;
-            off) launchctl unload "$PLIST" 2>/dev/null; rm -f "$PLIST"; echo "已取消开机自启";;
+            off) $APP --autostart off;;
+            *)   $APP --autostart status;;
           esac;;
   widget) # 小工具槽位（3×3 九点位）：./ld widget <sessions|context|activity|repos|power|clock|system> <tl|tc|tr|ml|mc|mr|bl|bc|br|off>
           if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi
@@ -72,26 +73,27 @@ PL
             *) echo "用法: ./ld widget {sessions|context|activity|repos|power|clock|system} {tl|tc|tr|ml|mc|mr|bl|bc|br|off}"; exit 1;; esac
           case "${3:-}" in tl|tc|tr|ml|mc|mr|bl|bc|br|off) ;;
             *) echo "槽位: tl/tc/tr 顶排  ml/mc/mr 中排  bl/bc/br 底排  off 关闭"; exit 1;; esac
-          echo "widget $2 $3" >> ~/.live-desktop.cmd; echo "小工具 $2 → $3";;
+          send "widget $2 $3"; echo "小工具 $2 → $3";;
   fx)     # 事件反应开关：./ld fx <toolPulse|phaseRipple|rechargeBurst|lowPowerFlicker|satellites> on|off
           if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi
           case "${2:-}" in toolPulse|phaseRipple|rechargeBurst|lowPowerFlicker|satellites) ;;
             *) echo "用法: ./ld fx {toolPulse|phaseRipple|rechargeBurst|lowPowerFlicker|satellites} on|off"; exit 1;; esac
           case "${3:-}" in on|off) ;; *) echo "用法: ./ld fx <id> on|off"; exit 1;; esac
-          echo "fx $2 $3" >> ~/.live-desktop.cmd; echo "事件反应 $2 → $3";;
-  model)  # 3D 模型（hologram 皮肤）：./ld model 列出可选；./ld model <内置名|user/文件名> 选中
+          send "fx $2 $3"; echo "事件反应 $2 → $3";;
+  model)  # 3D 模型（写当前皮肤的模型参数）：./ld model 列出可选；./ld model <内置名|user/文件名> 选中
           if [ -z "${2:-}" ]; then
             echo "内置：reactor 反应堆 · station 空间站 · satellite 卫星 · drone 无人机 · helix 双螺旋"
-            echo "自定义（~/.config/live-desktop/models/*.glb）："; ls ~/.config/live-desktop/models/*.glb 2>/dev/null | sed 's|.*/|  user/|' || true
-            echo "当前：$(defaults read com.zhoujunpeng.livedesktop model 2>/dev/null || echo station)"; exit 0; fi
+            echo "自定义（~/.config/live-desktop/models/ 下的 .glb / .gltf / .fbx）："
+            ls ~/.config/live-desktop/models/ 2>/dev/null | grep -iE '\.(glb|gltf|fbx)$' | sed 's|^|  user/|' || true
+            echo "（模型按皮肤各存一份，当前值在设置页「当前皮肤」区查看）"; exit 0; fi
           if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi
-          shift; echo "model $*" >> ~/.live-desktop.cmd; echo "3D 模型 → $*（仅 hologram 皮肤显示）";;
+          shift; send "model $*"; echo "3D 模型 → $*（写入当前皮肤；当前皮肤没声明模型参数时不生效）";;
   skin)   # 当前皮肤自声明的设置项：./ld skin <id> <值>（on/off、数字、选项 id）；./ld skin reset 恢复默认；设置页里也能改
           if [ -z "$PID" ]; then echo "未运行，先 ./ld start"; exit 1; fi
           case "${2:-}" in
-            reset) echo "skin reset" >> ~/.live-desktop.cmd; echo "当前皮肤的设置项已恢复默认";;
+            reset) send "skin reset"; echo "当前皮肤的设置项已恢复默认";;
             "")    echo "用法: ./ld skin <id> <值> | ./ld skin reset   （可用的 id 见设置页「皮肤设置」或皮肤源码里的 declarePrefs）"; exit 1;;
-            *)     [ -z "${3:-}" ] && { echo "用法: ./ld skin <id> <值>"; exit 1; }; shift; echo "skin $*" >> ~/.live-desktop.cmd; echo "皮肤设置 $1 → ${*:2}";;
+            *)     [ -z "${3:-}" ] && { echo "用法: ./ld skin <id> <值>"; exit 1; }; shift; send "skin $*"; echo "皮肤设置 $1 → ${*:2}";;
           esac;;
   quota)  # 额度数据源：把 ld-statusline 接进 Claude Code 的 statusLine（只改这一个键，改前备份，off 恢复原样）
           case "${2:-status}" in
@@ -109,7 +111,7 @@ PL
   status) if [ -n "$PID" ]; then
             echo "运行中 pid=$PID"
             echo "最近状态（phase,tool,会话数,覆盖率,渲染,可见性,真实帧率）："
-            tail -3 diag.csv | cut -d, -f2,3,4,6,7,12,13 | sed 's/^/  /'
+            tail -3 "$LOGDIR/diag.csv" 2>/dev/null | cut -d, -f2,3,4,6,7,12,13 | sed 's/^/  /'
           else echo "未运行"; fi;;
   *) echo "用法: ./ld {start|next|demo|celebrate|hud|widget|fx|model|skin|settings|autostart|quota|hooks|report|pause|stop|status}";;
 esac

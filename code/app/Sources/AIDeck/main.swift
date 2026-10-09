@@ -93,6 +93,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 旁听桌面上的左键点击（全局监视器只"看"发给别的 App 的事件，不拦截；我们的窗口本来就点击穿透，点击照常落到 Finder）
         NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in self?.pushMouse(NSEvent.mouseLocation, down: true) }
         ModelServer.ensureUserModelsDir()                                                     // 自定义 3D 模型目录
+        try? FileManager.default.createDirectory(at: Self.cmdDir, withIntermediateDirectories: true)   // ./ld 命令队列
+        // 已接入的辅助二进制跟随 App 版本：升级后 ~/.config 里那份不同步，两端格式一变数据就悄悄断了
+        DispatchQueue.global(qos: .utility).async {
+            QuotaInstaller.syncInstalledBinary()
+            HooksInstaller.syncInstalledBinary()
+        }
         hud.layout()
         reconcileScreens()
         installMouseTracking()
@@ -286,11 +292,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - 控制文件（菜单栏在刘海屏可能不可用，命令行必须能全权控制）
 
-    private let cmdPath = NSHomeDirectory() + "/.live-desktop.cmd"
+    /// 命令队列目录：`./ld` 每条命令先写临时文件（点开头）再 mv 成 `*.cmd`，mv 原子，这里看到的永远是完整文件。
+    /// 以前是往 ~/.live-desktop.cmd 追加、这边「读 → 删」，两步之间追加的那行会被一起删掉、命令静默丢失
+    static let cmdDir = QuotaProbe.dir.appendingPathComponent("cmd", isDirectory: true)
 
     private func processCommands() {
-        guard let txt = try? String(contentsOfFile: cmdPath, encoding: .utf8) else { return }
-        try? FileManager.default.removeItem(atPath: cmdPath)
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: Self.cmdDir.path) else { return }
+        // 文件名是 `./ld` 写入时的定宽微秒时间戳，字典序即先后序
+        for name in names.sorted() where name.hasSuffix(".cmd") && !name.hasPrefix(".") {
+            let path = Self.cmdDir.appendingPathComponent(name).path
+            let txt = try? String(contentsOfFile: path, encoding: .utf8)
+            try? fm.removeItem(atPath: path)
+            if let txt { runCommands(txt) }
+        }
+    }
+
+    private func runCommands(_ txt: String) {
         for line in txt.split(separator: "\n") {
             let parts = line.split(separator: " ").map(String.init)
             guard let cmd = parts.first else { continue }
@@ -517,6 +535,22 @@ if let i = CommandLine.arguments.firstIndex(of: "--quota") {
 // 命令行模式：接入 / 卸载 / 查看 Notification hook 精细态数据源（./ld hooks on|off|status）
 if let i = CommandLine.arguments.firstIndex(of: "--hooks") {
     exit(HooksInstaller.run(Array(CommandLine.arguments[(i + 1)...])))
+}
+
+// 命令行模式：开机自启（./ld autostart on|off 调用这里）。plist 只由 Autostart 一处生成，与设置页的开关同一份内容
+if let i = CommandLine.arguments.firstIndex(of: "--autostart") {
+    let arg = i + 1 < CommandLine.arguments.count ? CommandLine.arguments[i + 1] : "status"
+    do {
+        switch arg {
+        case "on":  try Autostart.enable();  print("已写入 \(Autostart.plistURL.path)")
+        case "off": try Autostart.disable(); print("已取消开机自启")
+        default:    print(Autostart.isEnabled ? "已开启：\(Autostart.plistURL.path)" : "未开启")
+        }
+        exit(0)
+    } catch {
+        FileHandle.standardError.write("失败：\(error)\n".data(using: .utf8)!)
+        exit(1)
+    }
 }
 
 // bundle id 去掉 .spike 后的一次性迁移（在一切 UserDefaults 读取之前）

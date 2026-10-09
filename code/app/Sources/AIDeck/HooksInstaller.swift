@@ -160,17 +160,15 @@ enum HooksInstaller {
     }
 
     private static func installHookBinary() throws {
-        let fm = FileManager.default
-        let candidates = [
-            Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/ld-hook"),
-            Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("LdHook"),
-        ].compactMap { $0 }
-        guard let src = candidates.first(where: { fm.fileExists(atPath: $0.path) }) else {
+        guard let src = HelperBinary.bundled("ld-hook", devName: "LdHook") else {
             throw Failure(description: "找不到 ld-hook 二进制（应在 .app/Contents/MacOS/）")
         }
-        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        if fm.fileExists(atPath: hookBinaryURL.path) { try fm.removeItem(at: hookBinaryURL) }
-        try fm.copyItem(at: src, to: hookBinaryURL)
-        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hookBinaryURL.path)
+        try HelperBinary.place(src, at: hookBinaryURL)
+    }
+
+    /// 启动时调用：已接入就把 ld-hook 同步成本次 App 自带的版本（理由同 QuotaInstaller.syncInstalledBinary）
+    static func syncInstalledBinary() {
+        guard inspect().installed, let src = HelperBinary.bundled("ld-hook", devName: "LdHook") else { return }
+        HelperBinary.syncIfChanged(src, at: hookBinaryURL)
     }
 }

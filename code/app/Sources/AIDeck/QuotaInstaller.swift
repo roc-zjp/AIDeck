@@ -327,18 +327,54 @@ enum QuotaInstaller {
     // MARK: - wrapper 二进制
 
     private static func installWrapperBinary() throws {
-        let fm = FileManager.default
-        // .app 里随包分发；开发态回落到编译产物
-        let candidates = [
-            Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/ld-statusline"),
-            Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("LdStatusline"),
-        ].compactMap { $0 }
-        guard let src = candidates.first(where: { fm.fileExists(atPath: $0.path) }) else {
+        guard let src = HelperBinary.bundled("ld-statusline", devName: "LdStatusline") else {
             throw Failure(description: "找不到 ld-statusline 二进制（应在 .app/Contents/MacOS/）")
         }
-        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        if fm.fileExists(atPath: wrapperURL.path) { try fm.removeItem(at: wrapperURL) }
-        try fm.copyItem(at: src, to: wrapperURL)
-        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: wrapperURL.path)
+        try HelperBinary.place(src, at: wrapperURL)
+    }
+
+    /// 启动时调用：已接入（settings.json 正指向我们的 wrapper）就把 wrapper 同步成本次 App 自带的版本。
+    /// 否则从 DMG 升级 App 后，~/.config 里那份还是接入当时复制的旧二进制，两端格式一变数据就悄悄断了
+    static func syncInstalledBinary() {
+        guard inspect().installed, let src = HelperBinary.bundled("ld-statusline", devName: "LdStatusline") else { return }
+        HelperBinary.syncIfChanged(src, at: wrapperURL)
+    }
+}
+
+/// 随 .app 分发、接入时复制到 ~/.config/live-desktop/ 的辅助二进制（ld-statusline / ld-hook）。
+/// 复制而不是直接指向 .app 里那份：settings.json 里的路径要稳定，App 挪位置 / 换开发目录都不能让它悬空
+enum HelperBinary {
+    /// .app 里的 Contents/MacOS/<name>；开发态（裸 SPM 产物）回落到同目录的 target 名
+    static func bundled(_ name: String, devName: String) -> URL? {
+        [Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/\(name)"),
+         Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent(devName)]
+            .compactMap { $0 }
+            .first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// 原子替换：先复制到同目录临时名再 rename。Claude Code 随时可能在执行它，
+    /// 「删了再复制」中间那一下 statusLine / hook 会找不到命令
+    static func place(_ src: URL, at dst: URL) throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let tmp = dst.deletingLastPathComponent().appendingPathComponent(".\(dst.lastPathComponent).\(getpid()).tmp")
+        try? fm.removeItem(at: tmp)
+        try fm.copyItem(at: src, to: tmp)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tmp.path)
+        guard rename(tmp.path, dst.path) == 0 else {
+            try? fm.removeItem(at: tmp)
+            throw QuotaInstaller.Failure(description: "替换 \(dst.path) 失败：\(String(cString: strerror(errno)))")
+        }
+    }
+
+    /// 内容一致就不动（每次启动都会调，绝大多数时候是 no-op）；不一致才替换并留一行日志
+    static func syncIfChanged(_ src: URL, at dst: URL) {
+        guard let a = try? Data(contentsOf: src), (try? Data(contentsOf: dst)) != a else { return }
+        do {
+            try place(src, at: dst)
+            FileHandle.standardError.write("[helper] 已把 \(dst.lastPathComponent) 同步为本次 App 自带的版本\n".data(using: .utf8)!)
+        } catch {
+            FileHandle.standardError.write("[helper] 同步 \(dst.lastPathComponent) 失败：\(error)\n".data(using: .utf8)!)
+        }
     }
 }
