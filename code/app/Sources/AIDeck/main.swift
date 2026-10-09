@@ -338,9 +338,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case "model":    // model <内置名 | user/文件名>（文件名可含空格）→ 写当前皮肤的模型参数
                 if parts.count > 1 {
                     let id = parts.dropFirst().joined(separator: " ")
-                    guard ModelServer.availableModels.contains(id) else { break }
-                    Prefs.setModel(id)                       // 全局值仍留着：新皮肤第一次用它作初值
-                    if let key = modelPrefID(for: animation) { Prefs.setSkinValue(animation, id: key, value: id) }
+                    guard ModelServer.availableModels.contains(id) else {
+                        FileHandle.standardError.write("[cmd] model：没有这个模型 \(id)\n".data(using: .utf8)!); break
+                    }
+                    guard let key = modelPrefID(for: animation) else {
+                        FileHandle.standardError.write("[cmd] model：当前皮肤 \(animation) 没有声明模型参数，忽略\n".data(using: .utf8)!); break
+                    }
+                    Prefs.setSkinValue(animation, id: key, value: id)
                     pushPrefs()
                 }
             case "skin":     // skin <id> <value> 改当前皮肤自声明的设置项；skin reset 恢复默认
@@ -450,7 +454,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let saved = Prefs.skinValues(skin)
         for p in schema where (p["type"] as? String) == "model" {
             guard let id = p["id"] as? String, saved[id] == nil else { continue }
-            Prefs.setSkinValue(skin, id: id, value: Prefs.model)
+            Prefs.setSkinValue(skin, id: id, value: Prefs.legacyGlobalModel)
             pushPrefs()
         }
         settings?.skinSchemaChanged(skin)

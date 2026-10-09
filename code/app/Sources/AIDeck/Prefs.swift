@@ -45,9 +45,11 @@ enum Prefs {
         return m
     }
 
-    /// 3D 模型（hologram 皮肤用）：内置名或 user/<文件名>；文件后来被删了也照常推给页面，页面如实显示加载失败并回落内置
+    /// 3D 模型从 2026-09-18 起是**每个皮肤自己的参数**（皮肤 declarePrefs 声明 type:'model'，值存在 skinValues 里），唯一真相源在那里。
+    /// 这个全局键是那之前的旧值，2026-10-09 起只读、不再写入也不再推给页面：
+    /// 仅当某个 3D 皮肤第一次报出模型参数、还没存过值时，拿它当初值——老用户选过的模型不丢
     static let defaultModel = "station"
-    static var model: String {
+    static var legacyGlobalModel: String {
         let m = UserDefaults.standard.string(forKey: "model") ?? defaultModel
         return m.isEmpty ? defaultModel : m
     }
@@ -186,9 +188,9 @@ enum Prefs {
         }
     }
 
-    /// 完整偏好：小工具 / 事件反应 / 3D 模型 + 当前皮肤自声明设置项里用户改过的值（默认值由皮肤自己持有）
+    /// 完整偏好：小工具 / 事件反应 + 当前皮肤自声明设置项里用户改过的值（默认值由皮肤自己持有；3D 模型也在其中）
     static func config(skin: String) -> [String: Any] {
-        ["widgets": widgetSlots, "reactions": reactionFlags, "model": model, "skin": skinValues(skin)]
+        ["widgets": widgetSlots, "reactions": reactionFlags, "skin": skinValues(skin)]
     }
 
     // MARK: - 皮肤自声明设置项（决策 006）：宿主不认识具体的 id，只按皮肤名存用户改过的值；schema 由皮肤页面运行时上报
@@ -215,13 +217,6 @@ enum Prefs {
         case "off", "false", "no": return false
         default: if let d = Double(s) { return d }; return s
         }
-    }
-
-    @discardableResult
-    static func setModel(_ id: String) -> Bool {
-        guard ModelServer.availableModels.contains(id) else { return false }
-        UserDefaults.standard.set(id, forKey: "model")
-        return true
     }
 
     @discardableResult

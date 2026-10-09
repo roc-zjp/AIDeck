@@ -22,8 +22,7 @@
     // task 已删（与 SESSIONS/状态卡完全重复）；clock / system 默认关（菜单栏有时钟；机器总量不是核心感知，想看的自己开）
     widgets:   { sessions: 'tl', context: 'tr', activity: 'bl', repos: 'br', power: 'bc', clock: 'off', system: 'off' },
     reactions: { toolPulse: true, phaseRipple: true, rechargeBurst: true, lowPowerFlicker: true, satellites: true },
-    model: 'station',   // hologram 皮肤的 3D 模型：内置名或 user/<文件名>（ld-3d.js 负责加载）
-    skin: {},           // 皮肤自声明设置项的值（见 declarePrefs）
+    skin: {},           // 皮肤自声明设置项的值（见 declarePrefs；3D 模型也是其中一项，type:'model'）
   };
   let config = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
   // 皮肤自声明的设置项：schema 由皮肤在加载时 declarePrefs 给出，值由宿主经 setConfig({skin:{...}}) 推回（只存用户改过的）
@@ -91,7 +90,6 @@
       config = {
         widgets:   Object.assign({}, DEFAULT_CONFIG.widgets,   (c && c.widgets)   || {}),
         reactions: Object.assign({}, DEFAULT_CONFIG.reactions, (c && c.reactions) || {}),
-        model: (c && typeof c.model === 'string' && c.model) ? c.model : DEFAULT_CONFIG.model,
       };
       skinSaved = (c && c.skin && typeof c.skin === 'object') ? c.skin : {};
       config.skin = skinValues();

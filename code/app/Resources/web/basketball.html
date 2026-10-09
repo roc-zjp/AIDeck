@@ -691,7 +691,7 @@ __ld.loop((t, th, st) => {
   uctx.clearRect(0, 0, W, H);
 
   if (booted) {
-    ensureModel((P() && P().model) || (__ld.config && __ld.config.model) || 'station');
+    ensureModel((P() && P().model) || 'station');
     update(dt, nowS, st, working, !!wait);
     pose(dt, nowS, st, !!wait);
     updateNet(nowS);

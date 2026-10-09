@@ -66,7 +66,7 @@ __ld.loop((t, th, st) => {
   const dim = ev.lowPower && __ld.flicker(t, pw.remain) ? 0.35 : 1;
   yaw += dt * (0.25 + th.energy * 0.9);          // 自转随活跃度
   spinT += dt * (0.3 + th.energy * 1.4);         // 部件转动（旋翼 / 环）随活跃度
-  if (r3) ensureModel((__ld.config.skin && __ld.config.skin.model) || (__ld.config && __ld.config.model) || 'station');
+  if (r3) ensureModel((__ld.config.skin && __ld.config.skin.model) || 'station');
 
   // 模型中心略高于屏幕中心，给底座和标牌留位置
   const ndc = [0, 40 * S / H * 2];

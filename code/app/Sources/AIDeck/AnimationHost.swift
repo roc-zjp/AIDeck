@@ -126,8 +126,9 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
         Self.log("[webkit] 皮肤 \(currentAnimation) 导航出错：\(error.localizedDescription)")
     }
 
-    /// 建好自定义皮肤目录，把运行时（ld.js / ld-widgets.js）同步进去，首次生成契约说明。
-    /// 每次启动都同步：运行时升级后用户皮肤自动跟上，用户改的是自己的 HTML，不会被覆盖
+    /// 建好自定义皮肤目录，把运行时（ld.js / ld-widgets.js …）与契约说明 README 同步进去。
+    /// 每次启动都同步：运行时升级后用户皮肤自动跟上，契约说明也跟着改（以前 README 只在首次生成，契约变了老用户看到的还是旧的）；
+    /// 用户改的是自己的 HTML，不会被覆盖
     static func ensureUserSkinsDir(webDirectory: URL) {
         let fm = FileManager.default
         try? fm.createDirectory(at: userSkinsDir, withIntermediateDirectories: true)
@@ -136,9 +137,10 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
             if let a = try? Data(contentsOf: src), (try? Data(contentsOf: dst)) != a { try? a.write(to: dst) }
         }
         let readme = userSkinsDir.appendingPathComponent("README.md")
-        if !fm.fileExists(atPath: readme.path) {
-            try? """
+        let text = """
             # AIDeck 自定义皮肤
+
+            > 本文件与 ld.js 等运行时一样由 AIDeck 每次启动同步，改了也会被覆盖。
 
             把任意自包含的 `*.html` 放在这个目录，它就会出现在皮肤列表里（名字前缀 `user/`）。
             最快的起点：在设置页点「新建皮肤（从模板）」，会复制一份内置皮肤到这里。
@@ -154,7 +156,8 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
             - 可选：每帧调 `__ld.events(st, pw)` 拿真实事件 `{tool, phase, recharge, lowPower}`（pw 传 `__ldWidgets.computePower(st.quota)`），
               它已经按用户的「事件反应」开关过滤过；`__ld.flicker(t, remain)` 给低电量闪烁用。内置皮肤 matrix / radar / globe / circuit / warp 都是这样写的
             - 可选：`<script src="three.bundle.js"></script><script src="ld-3d.js"></script>` 后用 `__ld3d.Renderer(canvas)` 画全息风格 3D 模型，
-              `__ld3d.loadModel(__ld.config.model)` 拿用户在设置页选的模型（内置程序化模型或 ~/.config/live-desktop/models 里的 .glb / .gltf / .fbx，带骨骼动画会动）。
+              模型是皮肤自己的设置项：`declarePrefs` 里声明一个 `{ id: 'model', type: 'model', default: 'station' }`，
+              再 `__ld3d.loadModel(__ld.config.skin.model)` 拿用户在设置页选的模型（内置程序化模型或 ~/.config/live-desktop/models 里的 .glb / .gltf / .fbx，带骨骼动画会动）。
               three.bundle.js 就是打包好的 Three.js（全局 LD_THREE），自定义皮肤也可以直接用它画别的。写法看内置皮肤 hologram
             - 可选：皮肤自己的设置项——加载时调一次 `__ld.declarePrefs([{ id, name, type: 'bool'|'number'|'choice'|'model', default, min/max/step 或 options }])`，
               它们会出现在设置页的**「当前皮肤」区**（与「全局设置」区分开），换皮肤即整组更换；
@@ -168,7 +171,9 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
             ## 纪律
             屏幕上每个数字都必须来自 `st` 里的真实数据——宁可留空，不许造假。动效随意，但只对真实事件发生。
             改完 HTML 后在设置页点「重新加载」即可看到效果。
-            """.write(to: readme, atomically: true, encoding: .utf8)
+            """
+        if (try? String(contentsOf: readme, encoding: .utf8)) != text {
+            try? text.write(to: readme, atomically: true, encoding: .utf8)
         }
     }
 
