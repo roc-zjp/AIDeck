@@ -332,6 +332,7 @@ final class ClaudeStateProbe {
         if regDirty || heal { (regCache, regDrifted) = readRegistry(); regDirty = false }
         let alive: (Int32) -> Bool = { kill($0, 0) == 0 || errno == EPERM }
         let regs = regCache.filter { alive($0.pid) }   // 判活每拍现算：进程死了没有文件事件
+        if tickCount % 600 == 1 { sweepOrphans(live: Set(regs.map(\.sessionId))) }   // 启动第一拍 + 每 10 分钟
         // 格式异常只报活着的（读不出 pid 的无从判活，照报）：死进程留下的旧格式残留不该让桌面报警
         if let bad = regDrifted.first(where: { $0.pid.map(alive) ?? true }) {
             state.sourceIssue = Self.issueText("会话注册表", version: bad.version)
@@ -465,6 +466,47 @@ final class ClaudeStateProbe {
             ctxCache[id] = readContextPct(id)
         }
         return cached
+    }
+
+    // MARK: - 孤儿文件清理
+
+    /// ctx/ 与 hooks/ 按 sessionId 一会话一个文件，但只有读到活会话时才会顺手删——会话结束后永久留下
+    /// （2026-10-09 本机：hooks/ 51 个里 50 个属于已结束会话，最早 9 月 5 日；ctx/ 135 个）。
+    /// 只在注册表模式下做：回退模式没有可靠的「活着的会话」集合
+    private func sweepOrphans(live: Set<String>) {
+        let dirs = [ctxDir, hooksDir]
+        DispatchQueue.global(qos: .utility).async {
+            let fm = FileManager.default
+            var removed = 0
+            for dir in dirs {
+                guard let urls = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { continue }
+                let entries = urls.map { u in
+                    (name: u.lastPathComponent,
+                     mtime: (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date())
+                }
+                for name in Self.orphanFiles(entries, live: live, now: Date()) {
+                    if (try? fm.removeItem(at: dir.appendingPathComponent(name))) != nil { removed += 1 }
+                }
+            }
+            if removed > 0 {
+                FileHandle.standardError.write("[probe] 清理已结束会话的残留文件 \(removed) 个（ctx / hooks）\n".data(using: .utf8)!)
+            }
+        }
+    }
+
+    /// 该删的文件名（纯函数，可单测）：
+    ///   · <sessionId>.json，sessionId 不属于任何活会话
+    ///   · .<…>.tmp：ld-statusline / ld-hook 原子写到一半被打断留下的临时文件
+    /// 两类都要超过 minAge 没动过——刚启动的会话可能先写文件、注册表缓存下一拍才更新；
+    /// 何况误删也无害：ctx 下次刷新状态栏就重写，hooks 本来就有 30 分钟兜底。其余文件一概不碰
+    static func orphanFiles(_ entries: [(name: String, mtime: Date)], live: Set<String>, now: Date,
+                            minAge: TimeInterval = 3600) -> [String] {
+        entries.filter { e in
+            guard now.timeIntervalSince(e.mtime) > minAge else { return false }
+            if e.name.hasPrefix(".") { return e.name.hasSuffix(".tmp") }
+            guard e.name.hasSuffix(".json") else { return false }
+            return !live.contains(String(e.name.dropLast(".json".count)))
+        }.map(\.name)
     }
 
     /// 本会话的上下文占用（ld-statusline 按会话记录；只在会话活跃时变化，活跃时恰好会刷新，不会过期）

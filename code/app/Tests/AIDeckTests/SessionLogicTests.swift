@@ -161,4 +161,21 @@ final class SessionLogicTests: XCTestCase {
         XCTAssertFalse(ClaudeStateProbe.isStalled(busy: true, parked: false, phase: .running, idleSeconds: 1799))
         XCTAssertTrue(ClaudeStateProbe.isStalled(busy: true, parked: false, phase: .running, idleSeconds: 1800))
     }
+
+    // MARK: - ctx / hooks 孤儿文件清理
+
+    func testOrphanSweepSelectsOnlyOldDeadSessionsAndStaleTemps() {
+        let now = Date()
+        let old = now.addingTimeInterval(-7200), fresh = now.addingTimeInterval(-60)
+        let picked = ClaudeStateProbe.orphanFiles([
+            ("live-1.json", old),                 // 活会话：留
+            ("dead-1.json", old),                 // 已结束且够旧：删
+            ("dead-2.json", fresh),               // 已结束但刚写过：留（注册表缓存可能还没跟上）
+            (".dead-3.json.123.tmp", old),        // 写到一半的临时文件：删
+            (".dead-4.json.456.tmp", fresh),      // 可能正在写：留
+            ("README.md", old),                   // 不认识的文件：不碰
+            (".DS_Store", old),
+        ], live: ["live-1"], now: now)
+        XCTAssertEqual(Set(picked), ["dead-1.json", ".dead-3.json.123.tmp"])
+    }
 }
