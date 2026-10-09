@@ -158,7 +158,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 9) { [weak self] in
                 guard let u = self?.units.first else { return }
                 u.host.webView.evaluateJavaScript(
-                    "JSON.stringify({diag: window.__ldDiag(), 动画页残留HUD: !!document.getElementById('ld-hud')})"
+                    "JSON.stringify({diag: window.__ldDiag()})"
                 ) { r, e in
                     FileHandle.standardError.write("[selftest 动画页] \(r as? String ?? "nil") err=\(e?.localizedDescription ?? "-")\n".data(using: .utf8)!)
                 }

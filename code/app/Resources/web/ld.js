@@ -1,5 +1,5 @@
 /* 宿主 ↔ 页面的核心契约层：状态→主题映射、帧循环闸门、消息通道。
-   HUD 已拆为独立窗口（见 hud.js / hud.html），本文件不再渲染任何 HUD。 */
+   状态卡是宿主原生绘制的独立窗口，与皮肤页面无关。 */
 (function () {
   const PHASES = {
     idle:     { label: '空闲',     bg: [0x0a,0x0e,0x1a], a: [0x1e,0x3a,0x5f], b: [0x14,0x4d,0x54], energy: 0.18, speed: 0.16, pulse: 0.10 },
@@ -75,7 +75,6 @@
     frames: totalFrames, ticks, running, rafAlive: rafId !== null,
     vis: document.visibilityState, hidden: document.hidden, config,
     screen: { w: innerWidth, h: innerHeight },
-    hudSize: window.__ldHudSize ? window.__ldHudSize() : null,
     skin: window.__ldSkinDiag ? window.__ldSkinDiag() : null,  // 皮肤自报（如 hologram 的当前模型 / 加载错误）
     mouse, pendingClicks: clicks.length
   });
@@ -85,8 +84,6 @@
     setState(s) {
       state = s || state;
       target = PHASES[state.phase] || PHASES.idle;
-      // HUD 页面通过这个钩子接收状态；动画页面不注册它
-      if (window.__ldOnState) window.__ldOnState(state, PHASES[state.phase] || PHASES.idle);
     },
     get config() { return config; },
     // 第四个契约口子：宿主推送偏好（哪个小工具在哪个槽、哪些事件反应开）。缺省项一律回落默认

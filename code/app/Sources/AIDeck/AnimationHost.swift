@@ -1,11 +1,12 @@
 import AppKit
 import WebKit
 
-/// 动画宿主。动画本身是一个自包含 HTML 文件，切换动画 = 换文件。
-/// 与页面的契约只有三个方法：
-///   window.__ld.setState(obj)    宿主推送 Claude 状态
-///   window.__ld.setRunning(bool) 宿主控制渲染开关（省电的关键闸门）
-///   __ldReport({fps})            页面回报帧率（宿主用来验证闸门真的生效）
+/// 皮肤宿主（桌面每屏一个 + 设置页预览一个）。皮肤是一个自包含 HTML 文件，切换皮肤 = 换文件。
+/// 契约全部由 ld.js 实现，皮肤自己不用写：
+///   宿主 → 页面  __ld.setState(obj) 推 Claude 状态 · __ld.setConfig(obj) 推偏好 · __ld.setRunning(bool) 渲染闸门 ·
+///               __ld.setMouse(x, y, down) 被动输入感知 · __ldDiag() 页面自检
+///   页面 → 宿主  messageHandlers.ld 上报 {kind:'ready'} · {fps} · {kind:'prefs', schema}（皮肤自声明设置项）
+/// （状态卡早已改为原生绘制，WebView 时代的 hudSize / 编辑态钩子 2026-10-09 已清掉）
 final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     let webView: WKWebView
     private(set) var currentAnimation: String = ""
@@ -14,10 +15,6 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
     private var pendingConfig: [String: Any]?
     private var pendingRunning: Bool?      // 渲染开关也要缓存：页面就绪前推送会被静默吞掉，而 ld.js 默认 running=true
     private var ready = false
-    /// HUD 页面量出的内容尺寸（含阴影余量），宿主据此调整窗口大小
-    var onHudSize: ((Double, Double) -> Void)?
-    /// 页面就绪（含每次切换动画后重新加载）
-    var onReady: (() -> Void)?
     /// 可见桌面相对整块屏幕的四边内缩量（点）：菜单栏 / Dock 占掉的部分，来自 NSScreen.visibleFrame（真实事实，ScreenUnit 设置）。
     /// 页面拿它当"桌面边缘"——弹球皮肤的球不该滚到 Dock 后面。设置预览没有屏幕，保持为空
     var visibleInsets: [String: Double] = [:]
@@ -70,7 +67,7 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
 
     var availableAnimations: [String] {
         let bundled = (try? FileManager.default.contentsOfDirectory(atPath: webDirectory.path))?
-            .filter { $0.hasSuffix(".html") && $0 != "hud.html" }.sorted() ?? []
+            .filter { $0.hasSuffix(".html") }.sorted() ?? []
         let user = (try? FileManager.default.contentsOfDirectory(atPath: Self.userSkinsDir.path))?
             .filter { $0.hasSuffix(".html") && !$0.hasPrefix(".") }.sorted().map { Self.userPrefix + $0 } ?? []
         return bundled + user
@@ -182,8 +179,6 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
         webView.navigationDelegate = nil
         webView.stopLoading()
         webView.removeFromSuperview()
-        onHudSize = nil
-        onReady = nil
         onPrefsSchema = nil
         ready = false
     }
@@ -259,10 +254,6 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
         webView.evaluateJavaScript(String(format: "window.__ld && window.__ld.setMouse(%.1f,%.1f,%@);", x, y, down ? "true" : "false"))
     }
 
-    func setHudEditing(_ on: Bool) {
-        webView.evaluateJavaScript("window.__ldSetEditing && window.__ldSetEditing(\(on ? "true" : "false"));")
-    }
-
     /// 渲染开关（省电闸门）。意图存 pendingRunning：页面未就绪时 window.__ld 还不存在、这条 JS 是 no-op，
     /// 若丢掉 false 页面会按默认 running=true 白烧 GPU 直到 WebKit 自己判 hidden（约 1 分钟，见 issues.md）；
     /// 切皮肤重载同理——宿主只在开关变化时调用本方法，新页面必须靠 ready 回调补推
@@ -282,7 +273,6 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
         if let c = pendingConfig { pushConfigRaw(c) }
         if let p = pendingState { pushRaw(p) }
         if let r = pendingRunning { pushRunningRaw(r) }
-        onReady?()
     }
 
     private func pushRaw(_ obj: [String: Any]) {
@@ -297,15 +287,10 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
             if let c = pendingConfig { pushConfigRaw(c) }
             if let p = pendingState { pushRaw(p) }
             if let r = pendingRunning { pushRunningRaw(r) }
-            onReady?()
         }
         if let fps = body["fps"] as? Double { reportedFPS = fps }
         if let kind = body["kind"] as? String, kind == "prefs", let schema = body["schema"] as? [[String: Any]] {
             onPrefsSchema?(schema)
-        }
-        if let kind = body["kind"] as? String, kind == "hudSize",
-           let w = body["w"] as? Double, let h = body["h"] as? Double {
-            onHudSize?(w, h)
         }
     }
 }

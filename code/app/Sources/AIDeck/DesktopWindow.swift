@@ -19,7 +19,6 @@ final class DesktopWindow: NSWindow {
         // 所有 Space 都在、不随 Space 切换动画、不进 Cmd-Tab / Mission管理
         collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenNone]
 
-        desktopLevel = level
         ignoresMouseEvents = true      // 点击穿透，桌面图标照常可选
         isOpaque = true
         backgroundColor = .black
@@ -28,22 +27,6 @@ final class DesktopWindow: NSWindow {
         isReleasedWhenClosed = false
         displaysWhenScreenProfileChanges = true
         setFrame(rect, display: true)
-    }
-
-    /// 桌面层的原始 level，编辑 HUD 时临时抬高、结束后恢复
-    private(set) var desktopLevel: NSWindow.Level = .normal
-
-    /// 编辑模式：抬到浮动层并接收鼠标，否则回到桌面层并点击穿透
-    func setEditing(_ on: Bool) {
-        if on {
-            level = .floating
-            ignoresMouseEvents = false
-            orderFrontRegardless()
-        } else {
-            level = desktopLevel
-            ignoresMouseEvents = true
-            orderFront(nil)
-        }
     }
 
     override var canBecomeKey: Bool { false }

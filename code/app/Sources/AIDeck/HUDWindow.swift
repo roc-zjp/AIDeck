@@ -1,26 +1,8 @@
 import AppKit
 
-/// 透明拖拽层，压在 WKWebView 之上。
-/// 没有它，铺满窗口的 WebView 会吃掉 mouseDown，isMovableByWindowBackground 形同虚设。
-/// 只负责在穿透关闭时"接住"点击，不让它落到下面的 Finder 桌面；
-/// 实际拖动由 AppDelegate 的全局鼠标监听驱动 —— 桌面层窗口不参与正常事件路由，
-/// performDrag / isMovableByWindowBackground 在这里都是失效的。
-final class DragOverlay: NSView {
-    override func mouseDown(with event: NSEvent) { /* 消费掉即可 */ }
-    override func mouseDragged(with event: NSEvent) {}
-    override func mouseUp(with event: NSEvent) {}
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        guard window?.ignoresMouseEvents == false else { return nil }
-        return super.hitTest(point)
-    }
-    override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .openHand)
-    }
-}
-
 /// 状态卡窗口：**全局唯一一张**（决策 010，不按显示器复制），挂在**桌面图标层之上**，因此永远不会被图标压住；
 /// 但仍低于普通应用窗口，所以只在桌面露出时可见——这正是它该有的行为。
-/// 位置归 AppDelegate 管（家屏 + 屏内偏移），可跨屏拖到任意一块显示器。
+/// 位置归 HUDController 管（家屏 + 屏内偏移），可跨屏拖到任意一块显示器。
 final class HUDWindow: NSWindow {
     private var normalLevel: NSWindow.Level = .normal
     private var userFloat = false     // 常驻置顶（用户偏好，./ld hud float）
