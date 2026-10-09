@@ -146,4 +146,19 @@ final class SessionLogicTests: XCTestCase {
         SessionState(id: project, pid: 1, project: project, name: nil, nameIsUserSet: false,
                      kind: "interactive", branch: nil, phase: phase, tool: nil, idleSeconds: idle)
     }
+
+    // MARK: - status=shell：后台 Bash 在跑（2026-10-09 实测）
+
+    func testBackgroundShellIsRunningBashNotWaiting() {
+        // 实测样本：Claude 说完「还在跑，等完成通知」、注册表 status=shell。不能报成等你输入
+        let r = ClaudeStateProbe.resolvePhase(busy: false, last: .assistantText, kind: "interactive", backgroundShell: true)
+        XCTAssertEqual(r?.phase, .running)
+        XCTAssertEqual(r?.tool, "Bash")
+    }
+
+    func testBackgroundShellStallsLikeLongTool() {
+        // 宿主把 shell 当忙传给停滞判定：后台任务 30 分钟没任何输出才算停滞
+        XCTAssertFalse(ClaudeStateProbe.isStalled(busy: true, parked: false, phase: .running, idleSeconds: 1799))
+        XCTAssertTrue(ClaudeStateProbe.isStalled(busy: true, parked: false, phase: .running, idleSeconds: 1800))
+    }
 }

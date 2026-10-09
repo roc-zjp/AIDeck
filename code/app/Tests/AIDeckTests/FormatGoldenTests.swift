@@ -134,9 +134,22 @@ final class FormatGoldenTests: XCTestCase {
         XCTAssertEqual(v, "2.9.0")
     }
 
-    func testRegistryUnknownStatusIsDrift() {
-        // 新增的取值真值表不认识，硬套只会显示错的阶段
-        guard case .drift = ClaudeStateProbe.decodeRegistry(registry(["status": "waiting"])) else { return XCTFail() }
+    func testRegistryShellStatusIsKnown() {
+        // 2026-10-09 在 Claude Code 2.1.295 实测：说完一轮、后台 Bash 还在跑时 status=shell
+        guard case .ok(let r) = ClaudeStateProbe.decodeRegistry(registry(["status": "shell"])) else { return XCTFail() }
+        XCTAssertTrue(r.statusKnown)
+    }
+
+    func testRegistryUnknownStatusKeepsSessionButIsFlagged() {
+        // 新取值：会话不能丢（丢掉比显示得不够准更糟），但要能被识别出来报异常
+        guard case .ok(let r) = ClaudeStateProbe.decodeRegistry(registry(["status": "compacting"])) else { return XCTFail() }
+        XCTAssertFalse(r.statusKnown)
+        XCTAssertEqual(ClaudeStateProbe.unknownStatusText(r.status, version: r.version),
+                       "Claude Code 2.9.0 出现未识别的会话状态「compacting」，相关会话阶段可能不准")
+    }
+
+    func testRegistryNonStringStatusIsDrift() {
+        guard case .drift = ClaudeStateProbe.decodeRegistry(registry(["status": 1])) else { return XCTFail() }
     }
 
     func testRegistryRenamedKeyIsDrift() {

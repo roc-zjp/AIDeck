@@ -174,7 +174,11 @@ final class ClaudeStateProbe {
 
     /// 决策 007 的真值表：注册表 status × jsonl 最后一条主线记录 → 阶段。
     /// 返回 nil = 这条不该列出（还没开口的空会话，或收尾中的后台任务）
-    static func resolvePhase(busy: Bool, last: Tail.Last?, kind: String) -> (phase: ClaudePhase, tool: String?)? {
+    /// backgroundShell：注册表 status=shell（2026-10-09 在 Claude Code 2.1.295 实测发现）——Claude 已说完这一轮，
+    /// 但留了后台 Bash 任务在跑，跑完会自动接着干。球不在你这边，按「执行工具 Bash」算，不能报成等你输入（会误发通知、误浮现）
+    static func resolvePhase(busy: Bool, last: Tail.Last?, kind: String,
+                             backgroundShell: Bool = false) -> (phase: ClaudePhase, tool: String?)? {
+        if backgroundShell { return (.running, "Bash") }
         let out: (phase: ClaudePhase, tool: String?)
         switch (busy, last) {
         case (true, .toolUse(let name)?): out = (.running, name)
@@ -213,7 +217,7 @@ final class ClaudeStateProbe {
         var pid: Int32
         var sessionId: String
         var cwd: String
-        var status: String            // busy / idle
+        var status: String            // busy / idle / shell（后台 Bash 在跑）；其余取值见 statusKnown
         var statusUpdatedAt: Date?    // 状态翻转时刻（毫秒 epoch）
         var name: String?
         var nameSource: String?       // derived = 系统派生；其他 = 用户起的
@@ -221,23 +225,26 @@ final class ClaudeStateProbe {
         var jobId: String?            // bg 会话：自己的作业 id
         var parkedJobId: String?      // interactive 会话：转入后台的作业 id（与某个 bg 会话的 jobId 对应）
         var version: String?          // 写这条记录的 Claude Code 版本，格式异常时报出来便于定位
+        /// 真值表认识的取值。不认识的不丢会话（按「不忙」显示，与这条规则出现前一致），但如实报异常
+        var statusKnown: Bool { Self.knownStatuses.contains(status) }
+        static let knownStatuses: Set<String> = ["busy", "idle", "shell"]
     }
 
-    /// 一条注册表记录的解码结果。drift = 是 JSON 对象但关键字段缺失 / 取值不认识——Claude Code 改了格式
+    /// 一条注册表记录的解码结果。drift = 是 JSON 对象但关键字段缺失——Claude Code 改了格式，这条会话无从显示
     enum RegistryDecode {
         case ok(Registered)
         case drift(pid: Int32?, version: String?)
         case unreadable                // 不是 JSON 对象（写到一半等），不算格式变化
     }
 
-    /// 必需字段：pid（判活）、sessionId / cwd（找 jsonl、项目名）、status ∈ busy|idle（决策 007 真值表的输入）。
-    /// status 多出新取值也算异常：真值表不认识它，硬套只会显示错的阶段
+    /// 必需字段：pid（判活）、sessionId / cwd（找 jsonl、项目名）、status（决策 007 真值表的输入）。
+    /// status 出现新取值不算 drift：会话照常列出、另报异常（Registered.statusKnown）——丢掉会话比显示得不够准更糟
     static func decodeRegistry(_ data: Data) -> RegistryDecode {
         guard let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return .unreadable }
         let pid = (o["pid"] as? NSNumber)?.int32Value
         let version = o["version"] as? String
         guard let pid, let sid = o["sessionId"] as? String, let cwd = o["cwd"] as? String,
-              let status = o["status"] as? String, status == "busy" || status == "idle"
+              let status = o["status"] as? String
         else { return .drift(pid: pid, version: version) }
         let statusAt = (o["statusUpdatedAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
         return .ok(Registered(pid: pid, sessionId: sid, cwd: cwd, status: status, statusUpdatedAt: statusAt,
@@ -315,6 +322,9 @@ final class ClaudeStateProbe {
     static func issueText(_ what: String, version: String?) -> String {
         "无法识别 Claude Code\(version.map { " " + $0 } ?? "") 的\(what)格式，状态可能不准"
     }
+    static func unknownStatusText(_ status: String, version: String?) -> String {
+        "Claude Code\(version.map { " " + $0 } ?? "") 出现未识别的会话状态「\(status)」，相关会话阶段可能不准"
+    }
 
     /// 注册表模式（决策 007）：pid 判活、busy/idle、会话名都来自 Claude Code 自己的注册表
     private func assembleFromRegistry(into state: inout ClaudeState, now: Date, heal: Bool,
@@ -342,7 +352,12 @@ final class ClaudeStateProbe {
             }
 
             let busy = reg.status == "busy"
-            guard let resolved = Self.resolvePhase(busy: busy, last: tail.last, kind: reg.kind) else { continue }
+            let backgroundShell = reg.status == "shell"
+            if !reg.statusKnown, state.sourceIssue == nil {
+                state.sourceIssue = Self.unknownStatusText(reg.status, version: reg.version)
+            }
+            guard let resolved = Self.resolvePhase(busy: busy, last: tail.last, kind: reg.kind,
+                                                   backgroundShell: backgroundShell) else { continue }
             let phase = resolved.phase
             let tool = resolved.tool
 
@@ -351,7 +366,7 @@ final class ClaudeStateProbe {
             let idle = max(0, Int(now.timeIntervalSince(since)))
             // 转后台：parkedJobId 对应一个活着的 bg 会话——本体沉默是正常的，不算停滞，活儿由 bg 会话代表
             let parked = reg.parkedJobId.map { liveBgJobs.contains($0) } ?? false
-            var stalled = Self.isStalled(busy: busy, parked: parked, phase: phase, idleSeconds: idle)
+            var stalled = Self.isStalled(busy: busy || backgroundShell, parked: parked, phase: phase, idleSeconds: idle)
             // 精细态：Notification hook 说这个会话卡在确认框 / 表单——球其实在你这边，别再冒充 running / thinking
             var phaseOut = phase, toolOut = tool, idleOut = idle
             var attention: AttentionKind?
