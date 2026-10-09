@@ -272,8 +272,15 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
         webView.evaluateJavaScript("window.__ld && window.__ld.setRunning(\(on ? "true" : "false"));")
     }
 
-    // 兜底：即使页面没发 ready，导航完成后也允许推状态
+    // 兜底：页面没发 ready（没引 ld.js 的自定义页面）时，导航完成后也允许推状态。
+    // 正常皮肤在 DOMContentLoaded 已发过 ready、补推过了，这里不再推第二遍（以前每次加载都推两遍）。
+    // 皮肤都是每帧读 __ld.config / 收 setState，没有依赖「load 之后再推一次」的（2026-10-09 已核对全部内置皮肤）
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard !ready else { return }
+        markReady()
+    }
+
+    private func markReady() {
         ready = true
         if let c = pendingConfig { pushConfigRaw(c) }
         if let p = pendingState { pushRaw(p) }
@@ -287,12 +294,7 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
 
     func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any] else { return }
-        if let kind = body["kind"] as? String, kind == "ready" {
-            ready = true
-            if let c = pendingConfig { pushConfigRaw(c) }
-            if let p = pendingState { pushRaw(p) }
-            if let r = pendingRunning { pushRunningRaw(r) }
-        }
+        if let kind = body["kind"] as? String, kind == "ready" { markReady() }
         if let fps = body["fps"] as? Double { reportedFPS = fps }
         if let kind = body["kind"] as? String, kind == "prefs", let schema = body["schema"] as? [[String: Any]] {
             onPrefsSchema?(schema)
