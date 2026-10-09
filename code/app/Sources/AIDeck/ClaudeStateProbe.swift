@@ -65,10 +65,14 @@ struct ClaudeState {
     var probeMillis: Double = 0   // 本轮探测耗时，用于评估轮询开销
     var claudeDetected = true     // ~/.claude 下有会话注册表或项目记录。false = 没装 / 从没跑过 Claude Code，
                                   // 状态卡要说清楚，不能和「真空闲」显示成一样
+    /// 数据源格式异常：读的是 Claude Code 没有公开文档的私有文件，它一升级字段就可能变。
+    /// 以前格式一变只会静默显示成「空闲」——这正是「宁可留空，不许造假」要防的。非 nil 时各端如实标出
+    var sourceIssue: String?
 
     var jsonObject: [String: Any] {
         [
             "claudeDetected": claudeDetected,
+            "sourceIssue": sourceIssue as Any,
             "phase": phase.rawValue,
             "tool": tool as Any,
             "project": project as Any,
@@ -125,6 +129,8 @@ final class ClaudeStateProbe {
     private var registryAvailable = false                  // 注册表目录存在（新版 Claude Code）；否则回退 jsonl 反推
     private var fallbackCandidates: [String: URL] = [:]    // 回退模式的发现集：sessionId → jsonl
     private var regCache: [Registered] = []
+    private var regDrifted: [(pid: Int32?, version: String?)] = []
+    private var lastIssue: String?
     private var regDirty = true
     private var dirtyTranscripts: Set<String> = []
     private var tailCache: [String: CachedTranscript] = [:]
@@ -202,8 +208,8 @@ final class ClaudeStateProbe {
             .max { (rank[$0.phase] ?? 0, -$0.idleSeconds) < (rank[$1.phase] ?? 0, -$1.idleSeconds) }
     }
 
-    /// 注册表里一条会话记录
-    private struct Registered {
+    /// 注册表里一条会话记录（internal：解码规则要能被单测直接喂）
+    struct Registered {
         var pid: Int32
         var sessionId: String
         var cwd: String
@@ -214,6 +220,31 @@ final class ClaudeStateProbe {
         var kind: String              // interactive / bg
         var jobId: String?            // bg 会话：自己的作业 id
         var parkedJobId: String?      // interactive 会话：转入后台的作业 id（与某个 bg 会话的 jobId 对应）
+        var version: String?          // 写这条记录的 Claude Code 版本，格式异常时报出来便于定位
+    }
+
+    /// 一条注册表记录的解码结果。drift = 是 JSON 对象但关键字段缺失 / 取值不认识——Claude Code 改了格式
+    enum RegistryDecode {
+        case ok(Registered)
+        case drift(pid: Int32?, version: String?)
+        case unreadable                // 不是 JSON 对象（写到一半等），不算格式变化
+    }
+
+    /// 必需字段：pid（判活）、sessionId / cwd（找 jsonl、项目名）、status ∈ busy|idle（决策 007 真值表的输入）。
+    /// status 多出新取值也算异常：真值表不认识它，硬套只会显示错的阶段
+    static func decodeRegistry(_ data: Data) -> RegistryDecode {
+        guard let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return .unreadable }
+        let pid = (o["pid"] as? NSNumber)?.int32Value
+        let version = o["version"] as? String
+        guard let pid, let sid = o["sessionId"] as? String, let cwd = o["cwd"] as? String,
+              let status = o["status"] as? String, status == "busy" || status == "idle"
+        else { return .drift(pid: pid, version: version) }
+        let statusAt = (o["statusUpdatedAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
+        return .ok(Registered(pid: pid, sessionId: sid, cwd: cwd, status: status, statusUpdatedAt: statusAt,
+                              name: o["name"] as? String, nameSource: o["nameSource"] as? String,
+                              kind: o["kind"] as? String ?? "interactive",
+                              jobId: o["jobId"] as? String, parkedJobId: o["parkedJobId"] as? String,
+                              version: version))
     }
 
     func probe() -> ClaudeState {
@@ -272,15 +303,30 @@ final class ClaudeStateProbe {
                                  agoSeconds: max(0, Int(now.timeIntervalSince($0.date)))) }
                 .sorted { $0.agoSeconds < $1.agoSeconds }
                 .prefix(14))
+        if state.sourceIssue != lastIssue {      // 只在变化时记一行，别每秒刷屏
+            lastIssue = state.sourceIssue
+            FileHandle.standardError.write("[probe] 数据源\(state.sourceIssue.map { "异常：" + $0 } ?? "恢复正常")\n".data(using: .utf8)!)
+        }
         state.probeMillis = Date().timeIntervalSince(t0) * 1000
         return state
+    }
+
+    /// 给人看的异常说明：哪份文件读不懂、是哪个版本的 Claude Code 写的
+    static func issueText(_ what: String, version: String?) -> String {
+        "无法识别 Claude Code\(version.map { " " + $0 } ?? "") 的\(what)格式，状态可能不准"
     }
 
     /// 注册表模式（决策 007）：pid 判活、busy/idle、会话名都来自 Claude Code 自己的注册表
     private func assembleFromRegistry(into state: inout ClaudeState, now: Date, heal: Bool,
                                       dirty: Set<String>) -> (Set<String>, [String]) {
-        if regDirty || heal { regCache = readRegistry(); regDirty = false }
-        let regs = regCache.filter { kill($0.pid, 0) == 0 || errno == EPERM }   // 判活每拍现算：进程死了没有文件事件
+        if regDirty || heal { (regCache, regDrifted) = readRegistry(); regDirty = false }
+        let alive: (Int32) -> Bool = { kill($0, 0) == 0 || errno == EPERM }
+        let regs = regCache.filter { alive($0.pid) }   // 判活每拍现算：进程死了没有文件事件
+        // 格式异常只报活着的（读不出 pid 的无从判活，照报）：死进程留下的旧格式残留不该让桌面报警
+        if let bad = regDrifted.first(where: { $0.pid.map(alive) ?? true }) {
+            state.sourceIssue = Self.issueText("会话注册表", version: bad.version)
+        }
+        let versionOf = Dictionary(regs.map { ($0.sessionId, $0.version) }, uniquingKeysWith: { a, _ in a })
         let liveBgJobs = Set(regs.filter { $0.kind == "bg" }.compactMap { $0.jobId })
         var liveIds: Set<String> = []
         for reg in regs {
@@ -291,6 +337,9 @@ final class ClaudeStateProbe {
                                                 heal: heal, dirty: dirty) else { continue }
             let mtime = entry.mtime
             let tail = entry.tail
+            if entry.formatDrift, state.sourceIssue == nil {
+                state.sourceIssue = Self.issueText("会话记录", version: versionOf[reg.sessionId] ?? nil)
+            }
 
             let busy = reg.status == "busy"
             guard let resolved = Self.resolvePhase(busy: busy, last: tail.last, kind: reg.kind) else { continue }
@@ -353,6 +402,7 @@ final class ClaudeStateProbe {
         for (sid, url) in fallbackCandidates {
             guard let entry = refreshTranscript(id: sid, url: url, project: nil, heal: heal, dirty: dirty)
             else { continue }
+            if entry.formatDrift, state.sourceIssue == nil { state.sourceIssue = Self.issueText("会话记录", version: nil) }
             let age = now.timeIntervalSince(entry.mtime)
             if age >= Self.fallbackWaitingWindow { continue }       // 超过等待窗口视为结束（对账拍会剔出候选）
             let phase: ClaudePhase
@@ -432,26 +482,21 @@ final class ClaudeStateProbe {
 
     // MARK: - 注册表
 
-    /// 只读不判活：判活（kill(pid,0)，进程死了不会有文件事件）由 probe() 每拍对缓存做
-    private func readRegistry() -> [Registered] {
+    /// 只读不判活：判活（kill(pid,0)，进程死了不会有文件事件）由 probe() 每拍对缓存做。
+    /// 格式对不上的记录单独返回（pid 能读出来的留着 pid，判活后再决定要不要报——死进程的残留记录不该报警）
+    private func readRegistry() -> (records: [Registered], drifted: [(pid: Int32?, version: String?)]) {
         guard let files = try? FileManager.default.contentsOfDirectory(at: sessionsDir, includingPropertiesForKeys: nil)
-        else { return [] }
-        var out: [Registered] = []
+        else { return ([], []) }
+        var out: [Registered] = [], drifted: [(pid: Int32?, version: String?)] = []
         for f in files where f.pathExtension == "json" {
-            guard let d = try? Data(contentsOf: f),
-                  let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-                  let pid = (o["pid"] as? NSNumber)?.int32Value,
-                  let sid = o["sessionId"] as? String,
-                  let cwd = o["cwd"] as? String else { continue }
-            let statusAt = (o["statusUpdatedAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
-            out.append(Registered(pid: pid, sessionId: sid, cwd: cwd,
-                                  status: o["status"] as? String ?? "",
-                                  statusUpdatedAt: statusAt,
-                                  name: o["name"] as? String, nameSource: o["nameSource"] as? String,
-                                  kind: o["kind"] as? String ?? "interactive",
-                                  jobId: o["jobId"] as? String, parkedJobId: o["parkedJobId"] as? String))
+            guard let d = try? Data(contentsOf: f) else { continue }
+            switch Self.decodeRegistry(d) {
+            case .ok(let r): out.append(r)
+            case .drift(let pid, let version): drifted.append((pid, version))
+            case .unreadable: continue
+            }
         }
-        return out
+        return (out, drifted)
     }
 
     /// 会话的 jsonl：~/.claude/projects/<slug(cwd)>/<sessionId>.jsonl；slug 规则对不上时全目录搜一次并缓存
@@ -484,7 +529,7 @@ final class ClaudeStateProbe {
     }
 
     /// 一次真实工具调用，缓存用绝对时间（ago 是相对量，组装时再算）
-    private struct ToolHit {
+    struct ToolHit {
         var tool: String
         var project: String
         var date: Date
@@ -496,6 +541,17 @@ final class ClaudeStateProbe {
         var mtime: Date
         var tail: Tail
         var tools: [ToolHit]
+        var formatDrift = false
+    }
+
+    /// 一段 jsonl 尾部的解析结果（纯数据，可单测）
+    struct ParsedTail {
+        var tail = Tail()
+        var tools: [ToolHit] = []
+        /// 格式变了的证据：对话记录的 message.content 既不是数组也不是字符串，或者 message.role 是对话角色、type 却不是。
+        /// 只在「因此认不出最后一条」时才算——个别读不懂但最后一条认得出，阶段判定不受影响。
+        /// 本机 2026-10-09 全量约 20 万条记录上两项均为 0，现行格式下不会误报
+        var formatDrift = false
     }
 
     /// 只读文件尾部，避免大会话（本机实测有 14000+ 行）被整体载入
@@ -503,7 +559,12 @@ final class ClaudeStateProbe {
         let now = Date()
         let mtime = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date ?? now
         var entry = CachedTranscript(url: url, mtime: mtime, tail: Tail(), tools: [])
-        parse(url, project: project ?? "?", now: now, into: &entry)
+        if let (text, truncated) = readTail(url) {
+            let p = Self.parseTail(text, truncated: truncated, project: project ?? "?", now: now)
+            entry.tail = p.tail
+            entry.tools = p.tools
+            entry.formatDrift = p.formatDrift
+        }
         if project == nil, let cwd = entry.tail.cwd {   // 回退模式：项目名解析完才知道，回填工具流
             let p = URL(fileURLWithPath: cwd).lastPathComponent
             for i in entry.tools.indices { entry.tools[i].project = p }
@@ -511,19 +572,25 @@ final class ClaudeStateProbe {
         return entry
     }
 
-    private func parse(_ url: URL, project: String, now: Date, into entry: inout CachedTranscript) {
-        guard let fh = try? FileHandle(forReadingFrom: url) else { return }
+    /// 文件末尾 tailBytes 字节；truncated = 没从文件头读起（首行可能被截断）
+    private func readTail(_ url: URL) -> (String, Bool)? {
+        guard let fh = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? fh.close() }
-        guard let size = try? fh.seekToEnd() else { return }
+        guard let size = try? fh.seekToEnd() else { return nil }
         let start = size > UInt64(tailBytes) ? size - UInt64(tailBytes) : 0
         try? fh.seek(toOffset: start)
-        guard let data = try? fh.readToEnd(),
-              let text = String(data: data, encoding: .utf8) else { return }
+        guard let data = try? fh.readToEnd(), let text = String(data: data, encoding: .utf8) else { return nil }
+        return (text, start > 0)
+    }
 
+    /// 从后往前扫：最后一条主线记录是谁说的、分支、cwd，顺路收最近 14 次工具调用（含 subagent 侧链）
+    static func parseTail(_ text: String, truncated: Bool, project: String, now: Date) -> ParsedTail {
+        var out = ParsedTail()
         var lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
-        if start > 0 && !lines.isEmpty { lines.removeFirst() }  // 首行可能被截断
+        if truncated && !lines.isEmpty { lines.removeFirst() }  // 首行可能被截断
 
         var collected = 0
+        var unreadable = false
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
@@ -531,11 +598,16 @@ final class ClaudeStateProbe {
             guard let d = line.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any]
             else { continue }
-            if entry.tail.branch == nil, let b = obj["gitBranch"] as? String, !b.isEmpty { entry.tail.branch = b }
-            if entry.tail.cwd == nil, let c = obj["cwd"] as? String, !c.isEmpty { entry.tail.cwd = c }
+            if out.tail.branch == nil, let b = obj["gitBranch"] as? String, !b.isEmpty { out.tail.branch = b }
+            if out.tail.cwd == nil, let c = obj["cwd"] as? String, !c.isEmpty { out.tail.cwd = c }
 
             let type = obj["type"] as? String ?? ""
-            guard type == "assistant" || type == "user" else { continue }
+            guard type == "assistant" || type == "user" else {
+                // 带对话角色的 message 却不叫 assistant / user：type 改名了
+                if let role = (obj["message"] as? [String: Any])?["role"] as? String,
+                   role == "assistant" || role == "user" { unreadable = true }
+                continue
+            }
             // 顺路收集真实的工具调用流（含 sidechain，subagent 的活动也是活动）
             if type == "assistant", collected < 14,
                let m = obj["message"] as? [String: Any],
@@ -543,29 +615,32 @@ final class ClaudeStateProbe {
                 for b in blocks where (b["type"] as? String) == "tool_use" {
                     guard let name = b["name"] as? String else { continue }
                     let date = (obj["timestamp"] as? String).flatMap { iso.date(from: $0) } ?? now
-                    entry.tools.append(ToolHit(tool: name, project: project, date: date))
+                    out.tools.append(ToolHit(tool: name, project: project, date: date))
                     collected += 1
                 }
             }
             // 侧链（subagent）事件不代表主会话"最后一条是谁说的"
             if obj["isSidechain"] as? Bool == true { continue }
-            if entry.tail.last == nil, let msg = obj["message"] as? [String: Any] {
+            if out.tail.last == nil {
+                let msg = obj["message"] as? [String: Any]
                 let blocks: [[String: Any]]
-                if let arr = msg["content"] as? [[String: Any]] { blocks = arr }
-                else if msg["content"] is String { blocks = [["type": "text"]] }
-                else { continue }
+                if let arr = msg?["content"] as? [[String: Any]] { blocks = arr }
+                else if msg?["content"] is String { blocks = [["type": "text"]] }
+                else { unreadable = true; continue }
                 let kinds = blocks.compactMap { $0["type"] as? String }
                 if type == "assistant" {
                     if let tu = blocks.first(where: { $0["type"] as? String == "tool_use" }),
-                       let name = tu["name"] as? String { entry.tail.last = .toolUse(name) }
-                    else if kinds.contains("text") { entry.tail.last = .assistantText }
+                       let name = tu["name"] as? String { out.tail.last = .toolUse(name) }
+                    else if kinds.contains("text") { out.tail.last = .assistantText }
                     else { continue }   // 纯 thinking 块等，继续往前找
                 } else {
-                    entry.tail.last = .user   // 你的输入或工具结果回灌，两者都意味着 Claude 要开始想了
+                    out.tail.last = .user   // 你的输入或工具结果回灌，两者都意味着 Claude 要开始想了
                 }
             }
-            if collected >= 14, entry.tail.last != nil { break }
+            if collected >= 14, out.tail.last != nil { break }
         }
+        out.formatDrift = unreadable && out.tail.last == nil
+        return out
     }
 }
 

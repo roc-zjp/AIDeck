@@ -169,8 +169,11 @@ final class HUDView: NSView {
         dotLayer.shadowRadius = 6
         dotLayer.shadowOffset = .zero
         // 「真空闲」与「根本没装 / 没跑过 Claude Code」以前显示成一样，新用户会以为它坏了
-        if sorted.isEmpty { headLabel.stringValue = state.claudeDetected ? "空闲 · 无活跃会话" : "未检测到 Claude Code 会话记录" }
-        else {
+        if sorted.isEmpty {
+            // 格式读不懂时不能显示「空闲」——那是在编造状态；如实说读不懂（ClaudeState.sourceIssue）
+            headLabel.stringValue = state.sourceIssue
+                ?? (state.claudeDetected ? "空闲 · 无活跃会话" : "未检测到 Claude Code 会话记录")
+        } else {
             let confirm = sorted.filter { $0.attention != nil }.count
             let plainWaiting = waiting - confirm
             var parts: [String] = []
@@ -178,6 +181,7 @@ final class HUDView: NSView {
             if plainWaiting > 0 { parts.append("\(plainWaiting) 个等你输入") }
             if busy > 0 { parts.append(waiting > 0 ? "\(busy) 个在跑" : "\(busy) 个会话在跑") }
             if stalled > 0 { parts.append("\(stalled) 个停滞") }
+            if state.sourceIssue != nil { parts.append("部分会话格式无法识别") }
             headLabel.stringValue = parts.joined(separator: " · ")
         }
         headLabel.textColor = color

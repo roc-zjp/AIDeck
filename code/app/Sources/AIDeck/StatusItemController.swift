@@ -115,6 +115,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             head = "未检测到 Claude Code 会话记录（~/.claude 下没有 sessions / projects）"
         }
         menu.addItem(NSMenuItem(title: head, action: nil, keyEquivalent: ""))
+        if let issue = state.sourceIssue {   // 数据源格式变了：会话可能漏列 / 阶段可能不准，如实说出来
+            menu.addItem(NSMenuItem(title: "数据源异常：\(issue)", action: nil, keyEquivalent: ""))
+        }
         // 第二行把菜单栏图标旁那个数字解释清楚：它就是等你输入的会话数
         let waitingCount = state.sessions.filter { $0.phase == .waiting }.count
         menu.addItem(NSMenuItem(title: "活跃会话 \(state.sessions.count) 个"
