@@ -204,7 +204,9 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
         if !visibleInsets.isEmpty { host["insets"] = visibleInsets }
         obj["host"] = host
         pendingState = obj
-        guard ready else { return }
+        // 闸门关着（桌面被盖住 / 息屏 / 暂停）时页面不跑帧，每秒推一份完整状态只是白白唤醒 WebContent 进程；
+        // 存着，开闸时 setRendering(true) 先补推最新这份。设置页预览从不设闸门（pendingRunning 为 nil），照常推
+        guard ready, pendingRunning != false else { return }
         pushRaw(obj)
     }
 
@@ -264,6 +266,7 @@ final class AnimationHost: NSObject, WKScriptMessageHandler, WKNavigationDelegat
     /// 切皮肤重载同理——宿主只在开关变化时调用本方法，新页面必须靠 ready 回调补推
     func setRendering(_ on: Bool) {
         pendingRunning = on
+        if on, ready, let p = pendingState { pushRaw(p) }   // 先补上闸门关闭期间攒下的最新状态，再开帧循环
         pushRunningRaw(on)
         if !on { reportedFPS = 0 }
     }

@@ -72,6 +72,7 @@
   window.__ldDiag = () => ({
     handler: typeof (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ld),
     frames: totalFrames, ticks, running, rafAlive: rafId !== null,
+    phase: state.phase,   // 页面此刻认为的阶段：与宿主对照，能看出状态推送有没有送到（闸门关闭期间不推）
     vis: document.visibilityState, hidden: document.hidden, config,
     screen: { w: innerWidth, h: innerHeight },
     skin: window.__ldSkinDiag ? window.__ldSkinDiag() : null,  // 皮肤自报（如 hologram 的当前模型 / 加载错误）

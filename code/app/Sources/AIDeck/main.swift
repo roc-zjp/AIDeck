@@ -94,6 +94,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 FileHandle.standardError.write("[selftest 工具流] \(tl)\n".data(using: .utf8)!)
                 let ss = self?.state.sessions.map { "\($0.name ?? $0.project)[\($0.kind)]/\($0.parked ? "parked" : $0.stalled ? "stalled" : $0.phase.rawValue)/\($0.tool ?? "-")/\($0.idleSeconds)s" }.joined(separator: "  ") ?? ""
                 FileHandle.standardError.write("[selftest 会话] 全局=\(self?.state.phase.rawValue ?? "?")  \(ss)\n".data(using: .utf8)!)
+                // 每块屏：闸门开没开、页面收到的阶段是不是宿主当前的阶段（闸门关着时页面停在关闸前那份，属正常）
+                for (i, u) in (self?.units ?? []).enumerated() {
+                    u.host.webView.evaluateJavaScript("window.__ldDiag().phase") { r, _ in
+                        FileHandle.standardError.write("[selftest 屏\(i)] 闸门=\(u.rendering ? "开" : "关") 宿主阶段=\(self?.state.phase.rawValue ?? "?") 页面阶段=\(r as? String ?? "nil")\n".data(using: .utf8)!)
+                    }
+                }
                 if let line = self?.hud.selftestLine() {
                     FileHandle.standardError.write((line + "\n").data(using: .utf8)!)
                 }
@@ -290,12 +296,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 unit.host.setRendering(shouldRender)
             }
         }
-        units.first?.host.queryDiag { [weak self] d in
+        if logDiagnostics { units.first?.host.queryDiag { [weak self] d in
             guard let self else { return }
             self.lastVis = d["vis"] as? String ?? "?"
             self.prevFrames = self.lastFrames
             self.lastFrames = d["frames"] as? Int ?? 0
-        }
+        } }   // 页面自检只喂诊断日志，不记日志就不必每拍去问页面
         statusBar?.updateIcon(state)
         if logDiagnostics { writeDiagLine() }
     }
