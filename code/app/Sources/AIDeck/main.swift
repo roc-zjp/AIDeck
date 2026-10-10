@@ -2,57 +2,6 @@ import AppKit
 import IOKit.ps
 import ApplicationServices
 
-final class ScreenUnit {
-    /// 显示器参数变化时会换成新的 NSScreen 对象，身份认 displayID
-    private(set) var screen: NSScreen
-    let displayID: CGDirectDisplayID
-    let window: DesktopWindow
-    let host: AnimationHost
-    var rendering = true
-    private let small: Bool
-
-    init(screen: NSScreen, animation: String, levelOverride: Int? = nil, small: Bool = false) {
-        self.screen = screen
-        self.displayID = ScreenUnit.displayID(of: screen)
-        self.small = small
-        window = DesktopWindow(screen: screen, levelOverride: levelOverride, small: small)
-        host = AnimationHost()
-        host.webView.frame = window.contentView?.bounds ?? screen.frame
-        window.contentView?.addSubview(host.webView)
-        host.load(animation)
-        host.pushConfig(Prefs.config(skin: animation))     // 页面就绪时连同状态一起补发
-        host.visibleInsets = ScreenUnit.insets(of: screen)
-        window.orderFront(nil)
-    }
-
-    /// 可见桌面相对屏幕 frame 的四边内缩量（点，页面坐标系 y 向下：top 是菜单栏、bottom 通常是 Dock）
-    static func insets(of s: NSScreen) -> [String: Double] {
-        let f = s.frame, v = s.visibleFrame
-        return ["top": f.maxY - v.maxY, "bottom": v.minY - f.minY, "left": v.minX - f.minX, "right": f.maxX - v.maxX]
-    }
-
-    static func displayID(of screen: NSScreen) -> CGDirectDisplayID {
-        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
-    }
-
-    /// 显示器还在、只是参数变了（分辨率 / 排列 / Dock）：重贴 frame 即可，不重建 WebView
-    func refit(to newScreen: NSScreen) {
-        screen = newScreen
-        host.visibleInsets = ScreenUnit.insets(of: newScreen)   // Dock 挪了 / 菜单栏高度变了，页面里的"桌面边缘"跟着变
-        guard !small, window.frame != newScreen.frame else { return }
-        window.setFrame(newScreen.frame, display: true)
-    }
-
-    /// 显示器拔掉了：窗口要真正下线。
-    /// 只 orderOut 不够——窗口对象仍被 NSApp 持有，WKWebView 的 WebContent 进程也不会退出。
-    /// （状态卡不在这里：它全局只有一张、归 AppDelegate 管，决策 010）
-    func tearDown() {
-        host.shutdown()
-        window.orderOut(nil)
-        window.close()
-    }
-}
-
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var units: [ScreenUnit] = []
     /// 状态卡全局唯一一张（决策 010）：独立成窗、挂图标层之上、原生绘制；生命周期与显示器无关，
@@ -76,9 +25,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastVis = "?"
     private var lastFrames = 0
     private var prevFrames = 0
-    private var pauseSignal: DispatchSourceSignal?
-    private var cycleSignal: DispatchSourceSignal?
-    private var sigtermSource: DispatchSourceSignal?
+    private lazy var control = ControlChannel { [weak self] in self?.execute($0) }
+    private let skinSchemas = SkinSchemaRegistry()
     private let logDiagnostics = CommandLine.arguments.contains("--log")
     // 测量用：绕开自动闸门，保证各动画在同一条件下可比
     private let forceRender = CommandLine.arguments.contains("--force-render")
@@ -93,7 +41,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 旁听桌面上的左键点击（全局监视器只"看"发给别的 App 的事件，不拦截；我们的窗口本来就点击穿透，点击照常落到 Finder）
         NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in self?.pushMouse(NSEvent.mouseLocation, down: true) }
         ModelServer.ensureUserModelsDir()                                                     // 自定义 3D 模型目录
-        try? FileManager.default.createDirectory(at: Self.cmdDir, withIntermediateDirectories: true)   // ./ld 命令队列
         // 已接入的辅助二进制跟随 App 版本：升级后 ~/.config 里那份不同步，两端格式一变数据就悄悄断了
         DispatchQueue.global(qos: .utility).async {
             QuotaInstaller.syncInstalledBinary()
@@ -118,26 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         RunLoop.main.add(timer!, forMode: .common)
 
-        // 便于自动化测量：kill -USR1 <pid> 切换渲染开关
-        signal(SIGUSR1, SIG_IGN)
-        let src = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
-        src.setEventHandler { [weak self] in self?.togglePause() }
-        src.resume()
-        pauseSignal = src
-
-        // 菜单栏图标在刘海屏上可能被挤掉，命令行必须能独立控制
-        // SIGTERM（./ld stop 的 pkill 默认信号）走温和退出：exit 0，launchd 的「异常才拉起」不会缠着重启
-        signal(SIGTERM, SIG_IGN)
-        let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-        term.setEventHandler { NSApp.terminate(nil) }
-        term.resume()
-        sigtermSource = term
-
-        signal(SIGUSR2, SIG_IGN)
-        let src2 = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
-        src2.setEventHandler { [weak self] in self?.cycleAnimation() }
-        src2.resume()
-        cycleSignal = src2
+        control.start()   // ./ld 命令队列 + SIGUSR1 暂停 / SIGUSR2 换皮肤 / SIGTERM 温和退出
 
         tick()
 
@@ -290,73 +218,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func setHudFloat(_ on: Bool) { hud.setFloating(on) }
     func setHudAutoFloat(_ on: Bool) { hud.setAutoFloat(on) }
 
-    // MARK: - 控制文件（菜单栏在刘海屏可能不可用，命令行必须能全权控制）
+    // MARK: - 控制通道（./ld 命令队列 + 信号，解析在 ControlChannel；这里只执行）
 
-    /// 命令队列目录：`./ld` 每条命令先写临时文件（点开头）再 mv 成 `*.cmd`，mv 原子，这里看到的永远是完整文件。
-    /// 以前是往 ~/.live-desktop.cmd 追加、这边「读 → 删」，两步之间追加的那行会被一起删掉、命令静默丢失
-    static let cmdDir = QuotaProbe.dir.appendingPathComponent("cmd", isDirectory: true)
-
-    private func processCommands() {
-        let fm = FileManager.default
-        guard let names = try? fm.contentsOfDirectory(atPath: Self.cmdDir.path) else { return }
-        // 文件名是 `./ld` 写入时的定宽微秒时间戳，字典序即先后序
-        for name in names.sorted() where name.hasSuffix(".cmd") && !name.hasPrefix(".") {
-            let path = Self.cmdDir.appendingPathComponent(name).path
-            let txt = try? String(contentsOfFile: path, encoding: .utf8)
-            try? fm.removeItem(atPath: path)
-            if let txt { runCommands(txt) }
-        }
-    }
-
-    private func runCommands(_ txt: String) {
-        for line in txt.split(separator: "\n") {
-            let parts = line.split(separator: " ").map(String.init)
-            guard let cmd = parts.first else { continue }
-            switch cmd {
-            case "hud":
-                let arg = parts.count > 1 ? parts[1] : "br"
-                switch arg {
-                case "on":      setHudVisible(true)
-                case "off":     setHudVisible(false)
-                case "edit":    hud.beginEdit()
-                case "through": setClickThrough(true)
-                case "drag":    setClickThrough(false)
-                case "float":   setHudFloat(true)
-                case "desktop": setHudFloat(false)
-                case "auto":    if parts.count > 2 { setHudAutoFloat(parts[2] == "on") }
-                default:        hud.setAnchor(arg)
-                }
-            case "celebrate":   // 手动触发一次庆祝动作（预览），转给所有屏的动画页面
-                for u in units { u.host.webView.evaluateJavaScript("window.__ldCelebrate&&window.__ldCelebrate()") }
-            case "next":  cycleAnimation()
-            case "pause": togglePause()
-            case "settings": openSettings()
-            case "widget":   // widget <id> <slot>
-                if parts.count > 2, Prefs.setWidget(parts[1], slot: parts[2]) { pushPrefs() }
-            case "fx":       // fx <id> on|off
-                if parts.count > 2, Prefs.setReaction(parts[1], on: parts[2] == "on") { pushPrefs() }
-            case "model":    // model <内置名 | user/文件名>（文件名可含空格）→ 写当前皮肤的模型参数
-                if parts.count > 1 {
-                    let id = parts.dropFirst().joined(separator: " ")
-                    guard ModelServer.availableModels.contains(id) else {
-                        FileHandle.standardError.write("[cmd] model：没有这个模型 \(id)\n".data(using: .utf8)!); break
-                    }
-                    guard let key = modelPrefID(for: animation) else {
-                        FileHandle.standardError.write("[cmd] model：当前皮肤 \(animation) 没有声明模型参数，忽略\n".data(using: .utf8)!); break
-                    }
-                    Prefs.setSkinValue(animation, id: key, value: id)
-                    pushPrefs()
-                }
-            case "skin":     // skin <id> <value> 改当前皮肤自声明的设置项；skin reset 恢复默认
-                if parts.count == 2, parts[1] == "reset" { Prefs.resetSkin(animation); pushPrefs() }
-                else if parts.count > 2 { Prefs.setSkinValue(animation, id: parts[1], value: Prefs.parseSkinValue(parts.dropFirst(2).joined(separator: " "))); pushPrefs() }
-            default: break
+    private func execute(_ cmd: ControlCommand) {
+        switch cmd {
+        case .hud(.visible(let on)):      setHudVisible(on)
+        case .hud(.edit):                 hud.beginEdit()
+        case .hud(.clickThrough(let on)): setClickThrough(on)
+        case .hud(.float(let on)):        setHudFloat(on)
+        case .hud(.autoFloat(let on)):    setHudAutoFloat(on)
+        case .hud(.anchor(let a)):        hud.setAnchor(a)
+        case .celebrate:   // 手动触发一次庆祝动作（预览），转给所有屏的动画页面
+            for u in units { u.host.webView.evaluateJavaScript("window.__ldCelebrate&&window.__ldCelebrate()") }
+        case .nextSkin:    cycleAnimation()
+        case .togglePause: togglePause()
+        case .settings:    openSettings()
+        case .quit:        NSApp.terminate(nil)
+        case .widget(let id, let slot):
+            if Prefs.setWidget(id, slot: slot) { pushPrefs() }
+        case .reaction(let id, let on):
+            if Prefs.setReaction(id, on: on) { pushPrefs() }
+        case .model(let id):   // 写当前皮肤的模型参数
+            guard ModelServer.availableModels.contains(id) else {
+                FileHandle.standardError.write("[cmd] model：没有这个模型 \(id)\n".data(using: .utf8)!); return
             }
+            guard let key = skinSchemas.modelPrefID(for: animation) else {
+                FileHandle.standardError.write("[cmd] model：当前皮肤 \(animation) 没有声明模型参数，忽略\n".data(using: .utf8)!); return
+            }
+            Prefs.setSkinValue(animation, id: key, value: id)
+            pushPrefs()
+        case .skinSet(let id, let value):
+            Prefs.setSkinValue(animation, id: id, value: value.any); pushPrefs()
+        case .skinReset:
+            Prefs.resetSkin(animation); pushPrefs()
         }
     }
 
     private func tick() {
-        processCommands()
+        control.drainQueue()
         // 显示器集合对账兜底：拔线时 didChangeScreenParameters 不可靠（2026-08-27 实测两轮拔插
         // 都拖到插回才触发对账，残窗留了 24–29s），每拍比对 displayID 集合，不一致走既有防抖路径
         let current = Set(NSScreen.screens.map { ScreenUnit.displayID(of: $0) })
@@ -429,11 +328,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
-
-    private static func hms(_ t: TimeInterval) -> String {
-        let s = max(0, Int(t)); return String(format: "%02d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
-    }
-
     @objc func pickAnimation(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
         applyAnimation(name)
@@ -444,27 +338,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings?.pushConfig()
     }
 
-    // MARK: - 皮肤自声明设置项：schema 来自页面运行时上报（桌面窗口或设置预览都可能先报），按皮肤名登记
-    private var skinSchemas: [String: [[String: Any]]] = [:]
+    // MARK: - 皮肤自声明设置项（登记与模型初值在 SkinSchemaRegistry）
+
     func registerSkinSchema(_ skin: String, _ schema: [[String: Any]]) {
-        skinSchemas[skin] = schema
-        // 3D 模型从「全局一个」改成「每个皮肤自己一个」（2026-09-18）。老用户选过的模型不能丢：
-        // 某皮肤第一次报出 model 类型的设置项、而它还没存过值时，用旧的全局模型填进去。
-        // 这里只认 type == "model"，不认识任何皮肤名——换成别人写的 3D 皮肤同样适用
-        let saved = Prefs.skinValues(skin)
-        for p in schema where (p["type"] as? String) == "model" {
-            guard let id = p["id"] as? String, saved[id] == nil else { continue }
-            Prefs.setSkinValue(skin, id: id, value: Prefs.legacyGlobalModel)
-            pushPrefs()
-        }
+        if skinSchemas.register(skin, schema) { pushPrefs() }   // 填了模型初值：推给页面
         settings?.skinSchemaChanged(skin)
     }
-    func skinSchema(for skin: String) -> [[String: Any]] { skinSchemas[skin] ?? [] }
-
-    /// 当前皮肤声明的 model 类型设置项 id（`./ld model` 要知道该写哪个键）；没有就是这款皮肤不用模型
-    func modelPrefID(for skin: String) -> String? {
-        skinSchemas[skin]?.first { ($0["type"] as? String) == "model" }?["id"] as? String
-    }
+    func skinSchema(for skin: String) -> [[String: Any]] { skinSchemas.schema(for: skin) }
 
     // MARK: - 设置窗口
 
@@ -531,50 +411,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-// 命令行模式：接入 / 卸载 / 查看额度数据源，不启动 UI（./ld quota on|off|status 调用这里）
-if let i = CommandLine.arguments.firstIndex(of: "--quota") {
-    exit(QuotaInstaller.run(Array(CommandLine.arguments[(i + 1)...])))
-}
-
-// 命令行模式：接入 / 卸载 / 查看 Notification hook 精细态数据源（./ld hooks on|off|status）
-if let i = CommandLine.arguments.firstIndex(of: "--hooks") {
-    exit(HooksInstaller.run(Array(CommandLine.arguments[(i + 1)...])))
-}
-
-// 命令行模式：开机自启（./ld autostart on|off 调用这里）。plist 只由 Autostart 一处生成，与设置页的开关同一份内容
-if let i = CommandLine.arguments.firstIndex(of: "--autostart") {
-    let arg = i + 1 < CommandLine.arguments.count ? CommandLine.arguments[i + 1] : "status"
-    do {
-        switch arg {
-        case "on":  try Autostart.enable();  print("已写入 \(Autostart.plistURL.path)")
-        case "off": try Autostart.disable(); print("已取消开机自启")
-        default:    print(Autostart.isEnabled ? "已开启：\(Autostart.plistURL.path)" : "未开启")
-        }
-        exit(0)
-    } catch {
-        FileHandle.standardError.write("失败：\(error)\n".data(using: .utf8)!)
-        exit(1)
-    }
-}
-
-// bundle id 去掉 .spike 后的一次性迁移（在一切 UserDefaults 读取之前）
-Prefs.migrateFromSpikeDomain()
-Autostart.migrateFromSpikeLabel()
-
-// 命令行模式：探测一次并打印 JSON，不启动 UI。配 CLAUDE_CONFIG_DIR 可指向沙箱目录，测注册表缺失的回退路径
-if CommandLine.arguments.contains("--probe-once") {
-    var st = ClaudeStateProbe().probe()
-    // 系统资源采两拍（隔 1s）：CPU / 磁盘吞吐是差分量，单拍只有 null
-    let sys = SystemProbe(); sys.sample(&st); Thread.sleep(forTimeInterval: 1); sys.sample(&st)
-    let obj = st.jsonObject
-    guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
-          let text = String(data: data, encoding: .utf8) else {
-        FileHandle.standardError.write("状态序列化失败：某个数值字段是 NaN / Inf（键：\(obj.keys.sorted().joined(separator: ",")))\n".data(using: .utf8)!)
-        exit(1)
-    }
-    print(text)
-    exit(0)
-}
+// 不启动 UI 的命令行模式（--quota / --hooks / --autostart / --probe-once）与启动前迁移，见 CommandLineModes
+CommandLineModes.runIfRequested()
 
 let app = NSApplication.shared
 let delegate = AppDelegate()
